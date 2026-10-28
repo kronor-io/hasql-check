@@ -2,16 +2,21 @@
 
 module Main where
 
-import Control.Exception (bracket_)
+import Control.Exception (SomeException, bracket_, try)
+import Control.Monad (void)
 import Data.ByteString.Lazy qualified as ByteString.Lazy
+import Data.Either (isLeft)
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text.Encoding
 import Hasql.Check.Lexer (AlexPosn (..))
 import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
+import Hasql.Check.TH qualified as Checked
+import Language.Haskell.TH (runQ)
+import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import System.Directory (findExecutable)
-import System.Environment (getEnvironment)
+import System.Environment (getEnvironment, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -26,6 +31,9 @@ main = sydTest do
     describe "parseQuasiQuotes" lexerSpec
     describe "hasql-check" $ aroundAll withPostgres executableSpec
     describe "hasql-check --nullability" $ aroundAll withPostgres nullabilitySpec
+    -- These share the process's environment and the module's one connection,
+    -- so they run one at a time, in order.
+    describe "Hasql.Check.TH" $ sequential $ doNotRandomiseExecutionOrder $ aroundAll withPostgres thSpec
 
 
 -- | The quoter, its line and column, and the SQL, of every quasiquote found.
@@ -271,3 +279,36 @@ nullabilitySpec = do
         (_, out) <- nullability conn "update account set name = name returning nickname :: text, name :: text"
         out `shouldSatisfy` ("column 1 (nickname)" `isInfixOf`)
         out `shouldNotSatisfy` ("column 2" `isInfixOf`)
+
+
+-- | Run a checked quoter as a splice would. Outside GHC a failing splice only
+-- says that it failed - the message goes to stderr - so the tests that expect
+-- a failure pair it with the same statement passing when nothing is checked.
+quote :: QuasiQuoter -> String -> IO (Either String ())
+quote quoter sql = either (Left . show) (const (Right ())) <$> (try (void (runQ (quoteExp quoter sql))) :: IO (Either SomeException ()))
+
+
+thSpec :: TestDef '[Text] ()
+thSpec = do
+    it "checks nothing when no database is set" do
+        unsetEnv "HASQL_CHECK_DATABASE_URL"
+        quote Checked.vectorStatement "select nope :: text from account" `shouldReturn` Right ()
+        quote Checked.resultlessStatement "delete from nowhere" `shouldReturn` Right ()
+
+    it "does not fail the build when the database cannot be reached" do
+        setEnv "HASQL_CHECK_DATABASE_URL" "host=/nonexistent"
+        quote Checked.maybeStatement "select nope :: text from account" `shouldReturn` Right ()
+
+    itWithOuter "accepts a statement that prepares" \conn -> do
+        setEnv "HASQL_CHECK_DATABASE_URL" (Text.unpack conn)
+        quote Checked.maybeStatement "select name :: text from account where id = $1 :: int4" `shouldReturn` Right ()
+
+    itWithOuter "fails on a statement that does not" \conn -> do
+        setEnv "HASQL_CHECK_DATABASE_URL" (Text.unpack conn)
+        result <- quote Checked.vectorStatement "select nope :: text from account"
+        result `shouldSatisfy` isLeft
+
+    itWithOuter "checks statements without rows" \conn -> do
+        setEnv "HASQL_CHECK_DATABASE_URL" (Text.unpack conn)
+        result <- quote Checked.resultlessStatement "delete from nowhere"
+        result `shouldSatisfy` isLeft

@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            hasql-check
-version:         0.2.0.0
+version:         0.3.0.0
 synopsis:        Check hasql-th statements against a live PostgreSQL schema
 description:
   Finds the hasql-th quasiquotes in Haskell source files and PREPAREs each
@@ -39,9 +39,12 @@ flag kronor-syntax
 
 library
   exposed-modules:
+    Hasql.Check
     Hasql.Check.Lexer
+    Hasql.Check.Nullability
     Hasql.Check.Parser
     Hasql.Check.Quoter
+    Hasql.Check.TH
 
   hs-source-dirs:     src
   default-language:   GHC2021
@@ -106,12 +109,22 @@ library
     ghc-options: -Werror
 
   build-depends:
+    , aeson
     , array
-    , base        >=4.11 && <10
+    , base               >=4.11 && <10
     , bytestring
+    , containers
     , directory
+    , hasql-th
     , mtl
+    , postgresql-syntax
+    , pqi
+    , pqi-ffi
+    , template-haskell
     , text
+
+  if flag(kronor-syntax)
+    cpp-options: -DKRONOR_SYNTAX
 
   build-tool-depends:
     , alex:alex
@@ -119,12 +132,6 @@ library
 
 executable hasql-check
   main-is:            Main.hs
-
-  -- cabal-fmt: expand app -Main -Hasql.Check.Lexer -Hasql.Check.Parser -Hasql.Check.Quoter
-  other-modules:
-    Hasql.Check
-    Hasql.Check.Nullability
-
   hs-source-dirs:     app
   default-language:   GHC2021
   default-extensions:
@@ -185,28 +192,15 @@ executable hasql-check
     -freverse-errors -fhide-source-paths
 
   build-depends:
-    , aeson
-    , array
-    , base               >=4.11 && <10
-    , bytestring
-    , containers
-    , directory
+    , base         >=4.11 && <10
     , hasql
     , hasql-check
-    , postgresql-syntax
     , pqi
     , pqi-ffi
     , text
 
-  if flag(kronor-syntax)
-    cpp-options: -DKRONOR_SYNTAX
-
   if flag(lint)
     ghc-options: -Werror
-
-  build-tool-depends:
-    , alex:alex
-    , happy:happy
 
 -- The executable tests start their own PostgreSQL server, so initdb, pg_ctl
 -- and psql must be on PATH.
@@ -227,13 +221,14 @@ test-suite hasql-check-test
     ghc-options: -Werror
 
   build-depends:
-    , base         >=4.11 && <10
+    , base              >=4.11 && <10
     , bytestring
     , directory
     , filepath
     , hasql-check
     , process
     , sydtest
+    , template-haskell
     , temporary
     , text
 

@@ -31,6 +31,7 @@ module Hasql.Check.Nullability (
     Catalogue,
     prepareSession,
     Warning (..),
+    describe,
     check,
     resultQuoters,
 ) where
@@ -350,6 +351,19 @@ data Warning = Warning
     , columnName :: Text
     , reason :: Text
     }
+
+
+-- | A warning as a sentence.
+describe :: Warning -> String
+describe w =
+    concat
+        [ "column "
+        , show w.column
+        , " ("
+        , Text.unpack w.columnName
+        , ") is annotated non-null, but "
+        , Text.unpack w.reason
+        ]
 
 
 -- | The name the stripped statement is prepared under, so that @EXPLAIN

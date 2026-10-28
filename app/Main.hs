@@ -213,15 +213,7 @@ main = do
                                                 warnings <- Nullability.check libPqConn cat ast
                                                 when (not (null warnings)) do
                                                     putStrLn ("Warning in " <> location file qq)
-                                                    forM_ warnings \w ->
-                                                        putStrLn
-                                                            ( "  column "
-                                                                <> show w.column
-                                                                <> " ("
-                                                                <> Data.Text.unpack w.columnName
-                                                                <> ") is annotated non-null, but "
-                                                                <> Data.Text.unpack w.reason
-                                                            )
+                                                    forM_ warnings \w -> putStrLn ("  " <> Nullability.describe w)
                                         _ -> pure ()
                                     pure (Right qq)
             when (any (any isLeft) results) (exitWith (ExitFailure 1))

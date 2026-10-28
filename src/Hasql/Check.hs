@@ -72,15 +72,18 @@ lowerAst = id
 
 
 prepare :: Pqi.Connection -> Text -> Text -> IO (Either String ())
-prepare conn stmtName unParsedStmt = do
-    case renderSql unParsedStmt of
-        Left err -> pure $ Left err
-        Right stmt -> do
-            mr <- conn.prepare (Text.encodeUtf8 stmtName) stmt Nothing
-            case mr of
-                Nothing -> pure (Left "Something went wrong")
-                Just r -> do
-                    rs <- r.resultStatus
-                    if rs `elem` [Pqi.EmptyQuery, Pqi.BadResponse, Pqi.NonfatalError, Pqi.FatalError]
-                        then maybe (Left "Something went wrong") (Left . Text.unpack . Text.decodeUtf8Lenient) <$> conn.errorMessage
-                        else pure (Right ())
+prepare conn stmtName unParsedStmt =
+    either (pure . Left) (prepareStmt conn (Text.encodeUtf8 stmtName)) (parseStmt unParsedStmt)
+
+
+-- | Prepare a statement under a name, returning the server's error if it fails.
+prepareStmt :: Pqi.Connection -> ByteString -> Ast.PreparableStmt -> IO (Either String ())
+prepareStmt conn stmtName stmt = do
+    mr <- conn.prepare stmtName (renderStmt stmt) Nothing
+    case mr of
+        Nothing -> Left . maybe "Something went wrong" (Text.unpack . Text.decodeUtf8Lenient) <$> conn.errorMessage
+        Just r -> do
+            rs <- r.resultStatus
+            if rs `elem` [Pqi.EmptyQuery, Pqi.BadResponse, Pqi.NonfatalError, Pqi.FatalError]
+                then maybe (Left "Something went wrong") (Left . Text.unpack . Text.decodeUtf8Lenient) <$> r.resultErrorMessage
+                else pure (Right ())

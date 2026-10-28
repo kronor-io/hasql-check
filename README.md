@@ -67,3 +67,33 @@ setting the session does not have cannot be planned, and only its table
 columns are checked. Give such settings placeholder values in the connection,
 for example `PGOPTIONS="-c app.tenant_id=0"`.
 
+### Checking while compiling
+
+`Hasql.Check.TH` exports hasql-th's quasiquoters, unchanged except that they
+check their statements against a database as they compile. Import it instead
+of `Hasql.TH`:
+
+```haskell
+import Hasql.Check.TH (maybeStatement)
+```
+
+Nothing is checked unless `HASQL_CHECK_DATABASE_URL` is set, so builds without
+a database behave exactly as with `Hasql.TH`. When it is set, a statement that
+does not prepare is a compile error at its quote. If the database cannot be
+reached, the build warns once and goes on.
+
+- `HASQL_CHECK_DATABASE_URL`: a libpq connection string or URI.
+- `HASQL_CHECK_SCHEMA_FILE`: a file that changes whenever the schema does,
+  such as a migration plan. Modules with checked quotes depend on it, so a
+  schema change rechecks them. Cabal only notices it if it is also in the
+  package's `extra-source-files`; GHCi notices it regardless.
+- `HASQL_CHECK_NULLABILITY`: when set, the `--nullability` warnings become
+  compiler warnings.
+
+GHC runs a quote only when it compiles the module, so a module compiled
+before the database was set, or before the schema changed, is not checked
+until it recompiles. Keep running the `hasql-check` executable in CI.
+
+One connection serves every quote the compiler runs; a dropped connection is
+replaced.
+
