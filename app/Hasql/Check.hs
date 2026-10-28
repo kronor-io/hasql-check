@@ -24,9 +24,16 @@ import Prelude
 -- with @Hasql.TH.Extraction.Exp.sql@ line for line. Rendering at 'mempty'
 -- drops the nullability markers.
 renderSql :: Text -> Either String ByteString
-renderSql sql = do
-    ast <- either (Left . Text.unpack) Right (Ast.parse quoterSettings sql :: Either Text Ast.PreparableStmt)
-    pure (Text.encodeUtf8 (Ast.toText mempty (lowerAst ast)))
+renderSql sql = renderStmt <$> parseStmt sql
+
+
+-- | The statement in a quasiquote, as the splice would render it.
+parseStmt :: Text -> Either String Ast.PreparableStmt
+parseStmt sql = either (Left . Text.unpack) (Right . lowerAst) (Ast.parse quoterSettings sql)
+
+
+renderStmt :: Ast.PreparableStmt -> ByteString
+renderStmt = Text.encodeUtf8 . Ast.toText mempty
 
 #ifdef KRONOR_SYNTAX
 

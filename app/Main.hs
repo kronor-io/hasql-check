@@ -15,6 +15,7 @@ import Data.Text (Text)
 import Data.Text qualified
 import Hasql.Check
 import Hasql.Check.Lexer
+import Hasql.Check.Nullability qualified as Nullability
 import Hasql.Check.Parser
 import Hasql.Check.Quoter
 import Hasql.Connection qualified
@@ -34,6 +35,7 @@ data Options = Options
     { database :: Maybe Text
     , extraQuoters :: [Text]
     , listOnly :: Bool
+    , nullability :: Bool
     , showHelp :: Bool
     }
 
@@ -44,6 +46,7 @@ defaultOptions =
         { database = Nothing
         , extraQuoters = []
         , listOnly = False
+        , nullability = False
         , showHelp = False
         }
 
@@ -65,6 +68,11 @@ options =
         ["list"]
         (NoArg (\o -> o{listOnly = True}))
         "list the quasiquotes that would be checked, without connecting"
+    , Option
+        ['n']
+        ["nullability"]
+        (NoArg (\o -> o{nullability = True}))
+        "warn about result columns annotated non-null that can be null"
     , Option
         ['h']
         ["help"]
@@ -180,7 +188,11 @@ main = do
             when (any (isLeft . snd) parsed) (exitWith (ExitFailure 1))
         else do
             conn <- getConnection opts
-            results <- withLibPqConnection conn \libPqConn ->
+            results <- withLibPqConnection conn \libPqConn -> do
+                catalogue <-
+                    if opts.nullability
+                        then either (error . ("Cannot check nullability: " <>)) Just <$> Nullability.prepareSession libPqConn
+                        else pure Nothing
                 forM parsed \case
                     (file, Left err) -> do
                         putStrLn ("Error in " <> file)
@@ -194,5 +206,22 @@ main = do
                                     putStrLn ("Error in " <> location file qq)
                                     putStrLn err
                                     pure (Left (DbError qq err))
-                                Right _ -> pure (Right qq)
+                                Right _ -> do
+                                    forM_ catalogue \cat -> case (qq, parseStmt stmt) of
+                                        (QuasiQuote (_, quoter) _, Right ast)
+                                            | isQuoterIn Nullability.resultQuoters quoter -> do
+                                                warnings <- Nullability.check libPqConn cat ast
+                                                when (not (null warnings)) do
+                                                    putStrLn ("Warning in " <> location file qq)
+                                                    forM_ warnings \w ->
+                                                        putStrLn
+                                                            ( "  column "
+                                                                <> show w.column
+                                                                <> " ("
+                                                                <> Data.Text.unpack w.columnName
+                                                                <> ") is annotated non-null, but "
+                                                                <> Data.Text.unpack w.reason
+                                                            )
+                                        _ -> pure ()
+                                    pure (Right qq)
             when (any (any isLeft) results) (exitWith (ExitFailure 1))

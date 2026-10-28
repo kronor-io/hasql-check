@@ -25,6 +25,7 @@ main :: IO ()
 main = sydTest do
     describe "parseQuasiQuotes" lexerSpec
     describe "hasql-check" $ aroundAll withPostgres executableSpec
+    describe "hasql-check --nullability" $ aroundAll withPostgres nullabilitySpec
 
 
 -- | The quoter, its line and column, and the SQL, of every quasiquote found.
@@ -105,7 +106,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null)"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create table note (account_id int4 not null references account, body text not null)"]
                 action conn
 
 
@@ -201,3 +202,72 @@ syntaxSpec =
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("Fixture.hs:1:5" `isInfixOf`)
 #endif
+
+
+-- | Run with --nullability on one statement; return the exit code and output.
+nullability :: Text -> Text -> IO (ExitCode, String)
+nullability conn statement =
+    runOn [] ["--database", Text.unpack conn, "--nullability"] ("f = [vectorStatement|" <> statement <> "|]\n")
+
+
+nullabilitySpec :: TestDef '[Text] ()
+nullabilitySpec = do
+    itWithOuter "warns about a nullable column annotated non-null, without failing" \conn -> do
+        (code, out) <- nullability conn "select nickname :: text from account"
+        code `shouldBe` ExitSuccess
+        out `shouldSatisfy` ("Fixture.hs:1:5" `isInfixOf`)
+        out `shouldSatisfy` ("column 1 (nickname) is annotated non-null, but public.account.nickname is nullable" `isInfixOf`)
+
+    itWithOuter "warns only when asked" \conn -> do
+        (code, out) <- runOn [] ["--database", Text.unpack conn] "f = [vectorStatement|select nickname :: text from account|]\n"
+        (code, out) `shouldBe` (ExitSuccess, "")
+
+    itWithOuter "accepts a nullable column annotated nullable" \conn ->
+        nullability conn "select nickname :: text? from account" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a NOT NULL column annotated non-null" \conn ->
+        nullability conn "select name :: text, id :: int4 from account" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a column guarded by IS NOT NULL" \conn ->
+        nullability conn "select nickname :: text from account where id > 0 and nickname is not null" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a guard that leaves out the table" \conn ->
+        nullability conn "select a.nickname :: text from account a where nickname is not null" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "does not check expressions" \conn ->
+        nullability conn "select count(*) :: int8, max(nickname) :: text from account" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "warns about a NOT NULL column on the nullable side of a left join" \conn -> do
+        (code, out) <- nullability conn "select a.name :: text, n.body :: text from account a left join note n on n.account_id = a.id"
+        code `shouldBe` ExitSuccess
+        out `shouldSatisfy` ("column 2 (body) is annotated non-null, but comes from the nullable side of an outer join" `isInfixOf`)
+        out `shouldNotSatisfy` ("column 1" `isInfixOf`)
+
+    -- Postgres plans the joins above as right joins with the tables swapped;
+    -- a lateral join cannot be swapped, so this one is planned as a left join.
+    itWithOuter "warns about the nullable side of a join planned as a left join" \conn -> do
+        (_, out) <- nullability conn "select a.name :: text, n.body :: text from account a left join lateral (select body from note where note.account_id = a.id limit 1) n on true"
+        out `shouldSatisfy` ("column 2 (body)" `isInfixOf`)
+        out `shouldNotSatisfy` ("column 1" `isInfixOf`)
+
+    itWithOuter "warns about the nullable side of a right join only" \conn -> do
+        (_, out) <- nullability conn "select a.name :: text, n.body :: text from note n right join account a on n.account_id = a.id"
+        out `shouldSatisfy` ("column 2 (body)" `isInfixOf`)
+        out `shouldNotSatisfy` ("column 1" `isInfixOf`)
+
+    itWithOuter "warns about both sides of a full join" \conn -> do
+        (_, out) <- nullability conn "select a.name :: text, n.body :: text from account a full join note n on n.account_id = a.id"
+        out `shouldSatisfy` ("column 1 (name)" `isInfixOf`)
+        out `shouldSatisfy` ("column 2 (body)" `isInfixOf`)
+
+    itWithOuter "lets IS NOT NULL clear the nullable side of a join" \conn ->
+        nullability conn "select n.body :: text from account a left join note n on n.account_id = a.id where n.body is not null" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "checks a statement with parameters" \conn -> do
+        (_, out) <- nullability conn "select nickname :: text from account where id = $1 :: int4"
+        out `shouldSatisfy` ("public.account.nickname is nullable" `isInfixOf`)
+
+    itWithOuter "checks RETURNING" \conn -> do
+        (_, out) <- nullability conn "update account set name = name returning nickname :: text, name :: text"
+        out `shouldSatisfy` ("column 1 (nickname)" `isInfixOf`)
+        out `shouldNotSatisfy` ("column 2" `isInfixOf`)
