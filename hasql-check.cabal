@@ -1,0 +1,238 @@
+cabal-version:   3.0
+name:            hasql-check
+version:         0.1.0.0
+synopsis:        Check hasql-th statements against a live PostgreSQL schema
+description:
+  Finds the hasql-th quasiquotes in Haskell source files and PREPAREs each
+  statement against a live PostgreSQL database, so statements that no longer
+  match the schema fail in CI rather than at runtime.
+
+category:        Database, Development
+homepage:        https://github.com/kronor-io/hasql-check
+bug-reports:     https://github.com/kronor-io/hasql-check/issues
+license:         BSD-3-Clause
+license-file:    LICENSE
+author:          Kronor
+maintainer:      lorenzo@kronor.io
+copyright:       2021-2026 Kronor
+build-type:      Simple
+extra-doc-files:
+  ChangeLog.md
+  README.md
+
+source-repository head
+  type:     git
+  location: https://github.com/kronor-io/hasql-check
+
+flag lint
+  description: lint
+  manual:      True
+  default:     False
+
+flag kronor-syntax
+  description:
+    Accept the hasql-th extensions of Kronor's forks (Haskell targets and
+    Haskell param fields). Needs Kronor's fork of postgresql-syntax.
+
+  manual:      True
+  default:     False
+
+library
+  exposed-modules:
+    Hasql.Check.Lexer
+    Hasql.Check.Parser
+    Hasql.Check.Quoter
+
+  hs-source-dirs:     src
+  default-language:   GHC2021
+  default-extensions:
+    ApplicativeDo
+    BangPatterns
+    BinaryLiterals
+    BlockArguments
+    ConstraintKinds
+    DataKinds
+    DefaultSignatures
+    DeriveAnyClass
+    DeriveDataTypeable
+    DeriveFoldable
+    DeriveFunctor
+    DeriveGeneric
+    DeriveTraversable
+    DerivingStrategies
+    DerivingVia
+    DoAndIfThenElse
+    DuplicateRecordFields
+    EmptyDataDecls
+    EmptyDataDeriving
+    ExistentialQuantification
+    FlexibleContexts
+    FlexibleInstances
+    FunctionalDependencies
+    GADTs
+    GeneralizedNewtypeDeriving
+    ImportQualifiedPost
+    InstanceSigs
+    KindSignatures
+    LambdaCase
+    MultiParamTypeClasses
+    MultiWayIf
+    NamedFieldPuns
+    NoImplicitPrelude
+    OverloadedRecordDot
+    OverloadedStrings
+    PartialTypeSignatures
+    PatternGuards
+    PatternSynonyms
+    PolyKinds
+    QuasiQuotes
+    RankNTypes
+    RecordWildCards
+    ScopedTypeVariables
+    StandaloneDeriving
+    StrictData
+    TupleSections
+    TypeApplications
+    TypeFamilies
+    TypeSynonymInstances
+    ViewPatterns
+
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+    -freverse-errors -fhide-source-paths
+
+  if flag(lint)
+    ghc-options: -Werror
+
+  build-depends:
+    , array
+    , base        >=4.11 && <10
+    , bytestring
+    , directory
+    , mtl
+    , text
+
+  build-tool-depends:
+    , alex:alex
+    , happy:happy
+
+executable hasql-check
+  main-is:            Main.hs
+
+  -- cabal-fmt: expand app -Main -Hasql.Check.Lexer -Hasql.Check.Parser -Hasql.Check.Quoter
+  other-modules:      Hasql.Check
+  hs-source-dirs:     app
+  default-language:   GHC2021
+  default-extensions:
+    ApplicativeDo
+    BangPatterns
+    BinaryLiterals
+    BlockArguments
+    ConstraintKinds
+    DataKinds
+    DefaultSignatures
+    DeriveAnyClass
+    DeriveDataTypeable
+    DeriveFoldable
+    DeriveFunctor
+    DeriveGeneric
+    DeriveTraversable
+    DerivingStrategies
+    DerivingVia
+    DoAndIfThenElse
+    DuplicateRecordFields
+    EmptyDataDecls
+    EmptyDataDeriving
+    ExistentialQuantification
+    FlexibleContexts
+    FlexibleInstances
+    FunctionalDependencies
+    GADTs
+    GeneralizedNewtypeDeriving
+    ImportQualifiedPost
+    InstanceSigs
+    KindSignatures
+    LambdaCase
+    MultiParamTypeClasses
+    MultiWayIf
+    NamedFieldPuns
+    NoImplicitPrelude
+    OverloadedRecordDot
+    OverloadedStrings
+    PartialTypeSignatures
+    PatternGuards
+    PatternSynonyms
+    PolyKinds
+    QuasiQuotes
+    RankNTypes
+    RecordWildCards
+    ScopedTypeVariables
+    StandaloneDeriving
+    StrictData
+    TupleSections
+    TypeApplications
+    TypeFamilies
+    TypeSynonymInstances
+    ViewPatterns
+
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+    -freverse-errors -fhide-source-paths
+
+  build-depends:
+    , array
+    , base               >=4.11 && <10
+    , bytestring
+    , directory
+    , hasql
+    , hasql-check
+    , postgresql-syntax
+    , pqi
+    , pqi-ffi
+    , text
+
+  if flag(kronor-syntax)
+    cpp-options: -DKRONOR_SYNTAX
+
+  if flag(lint)
+    ghc-options: -Werror
+
+  build-tool-depends:
+    , alex:alex
+    , happy:happy
+
+-- The executable tests start their own PostgreSQL server, so initdb, pg_ctl
+-- and psql must be on PATH.
+test-suite hasql-check-test
+  type:               exitcode-stdio-1.0
+  main-is:            Main.hs
+  hs-source-dirs:     test
+  default-language:   GHC2021
+  default-extensions:
+    BlockArguments
+    DataKinds
+    LambdaCase
+    OverloadedStrings
+
+  ghc-options:        -Wall -threaded -rtsopts -with-rtsopts=-N
+
+  if flag(lint)
+    ghc-options: -Werror
+
+  build-depends:
+    , base         >=4.11 && <10
+    , bytestring
+    , directory
+    , filepath
+    , hasql-check
+    , process
+    , sydtest
+    , temporary
+    , text
+
+  build-tool-depends: hasql-check:hasql-check
+
+  if flag(kronor-syntax)
+    cpp-options: -DKRONOR_SYNTAX
