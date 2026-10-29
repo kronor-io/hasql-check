@@ -18,6 +18,7 @@ module Hasql.Check.Inferred.Quote (
     Column (..),
     readInferred,
     annotated,
+    sent,
     columns,
     checkSent,
 ) where
@@ -101,6 +102,15 @@ annotated q = do
     pure (Ast.toText quoterSettings (annotate param stmt))
 
 
+-- | The statement as the quoter sends it, casts and all.
+sent :: Inferred -> Either String Text
+sent q = do
+    t <- template q.sql
+    params <- traverse postgresType q.params
+    row <- traverse (traverse postgresType) q.row
+    pure (render (map fst params) (maybe [] (map fst) row) t)
+
+
 -- | The Postgres type each result column is read as, and whether it may be
 -- NULL.
 columns :: Inferred -> Maybe [(Text, Bool)]
@@ -175,11 +185,11 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                                             , found' /= e
                                             ]
                         -- What is sent, wrapped in its casts.
-                        sent <-
+                        sentErrors <-
                             if null (paramErrors <> columnErrors)
                                 then either pure (const []) <$> described (render (map fst params) (maybe [] (map fst) row) t) paramOids
                                 else pure []
-                        pure (paramErrors <> columnErrors <> sent)
+                        pure (paramErrors <> columnErrors <> sentErrors)
   where
     described sql paramOids = do
         prepared <- conn.prepare "" (Text.encodeUtf8 sql) (Just paramOids)
