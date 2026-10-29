@@ -63,5 +63,8 @@ jobs:
         with:
           path: ~/.cabal/store
           key: ${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('**/*.cabal') }}
-      - run: cabal build hasql-check --enable-tests --flags=lint --project-file=cabal.project.library
-      - run: cabal test hasql-check --flags=lint --test-show-details=direct --project-file=cabal.project.library
+      # 'all' is the whole project, which this project file narrows to
+      # hasql-check. Naming the package instead is ambiguous from cabal 3.18
+      # on, since it also has a component of that name.
+      - run: cabal build all --enable-tests --flags=lint --project-file=cabal.project.library
+      - run: cabal test all --flags=lint --test-show-details=direct --project-file=cabal.project.library
