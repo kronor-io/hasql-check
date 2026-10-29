@@ -574,6 +574,10 @@ piecesSpec = do
         sent "select a from t where id = any($1)" ["int8[]"] ["text"]
             `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT a FROM t WHERE id = ANY ($1 :: int8[])) SELECT c1 :: text FROM hasql_check_result"
 
+    it "annotates a subscripted parameter before its subscript" $
+        sent "select $1['a']" ["jsonb"] ["jsonb"]
+            `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT ($1 :: jsonb)['a']) SELECT c1 :: jsonb FROM hasql_check_result"
+
     it "sends a statement without rows as it is" $
         sent "delete from t where id = $1" ["int8"] []
             `shouldBe` Right "DELETE FROM t WHERE id = $1 :: int8"
@@ -678,6 +682,10 @@ runtimeSpec = do
     itWithOuter "reads an int4[] with NULLs as a Vector of Maybe Int64" \conn ->
         runStatement conn (1 :: Int32) [Inferred.singletonStatement|select scores from tagged where id = $1|]
             `shouldReturn` Vector.fromList [Just 1, Nothing, Just (3 :: Int64)]
+
+    itWithOuter "subscripts an array parameter" \conn ->
+        runStatement conn [10, 20 :: Int64] [Inferred.singletonStatement|select $1[2]|]
+            `shouldReturn` (20 :: Int64)
 
     itWithOuter "sends a list as an array" \conn ->
         runStatement conn [1, 2 :: Int64] [Inferred.vectorStatement|select id from tagged where id = any($1)|]
@@ -823,6 +831,10 @@ inferredSpec = do
             (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" ["--database", Text.unpack conn, source, "--inferred", quotesFile]) ""
             code `shouldBe` ExitFailure 1
             (out <> err) `shouldSatisfy` ("column \"nope\" does not exist" `isInfixOf`)
+
+    itWithOuter "accepts a subscripted parameter, which it uses" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select $1['a']" [Column "Data.Aeson.Types.Internal.Value" "jsonb" False []] (Just [Column "Data.Aeson.Types.Internal.Value" "jsonb" True []])]
+            `shouldReturn` (ExitSuccess, "")
 
     -- It runs, but whatever it was meant to do with $1, it does not.
     itWithOuter "rejects a statement that does not use a parameter the Haskell type sends" \conn -> do
