@@ -561,6 +561,10 @@ piecesSpec = do
         sent "select ' :: hasql_check_slot_1'" [] ["text"]
             `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT ' :: hasql_check_slot_1') SELECT c1 :: text FROM hasql_check_result"
 
+    it "annotates a subscripted parameter before its subscript" $
+        sent "select $1['a']" ["jsonb"] ["jsonb"]
+            `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT ($1 :: jsonb)['a']) SELECT c1 :: jsonb FROM hasql_check_result"
+
     it "sends a statement without rows as it is" $
         sent "delete from t where id = $1" ["int8"] []
             `shouldBe` Right "DELETE FROM t WHERE id = $1 :: int8"
@@ -749,6 +753,10 @@ inferredSpec = do
             (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" ["--database", Text.unpack conn, source, "--inferred", quotesFile]) ""
             code `shouldBe` ExitFailure 1
             (out <> err) `shouldSatisfy` ("column \"nope\" does not exist" `isInfixOf`)
+
+    itWithOuter "accepts a subscripted parameter, which it uses" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select $1['a']" [Column "Data.Aeson.Types.Internal.Value" "jsonb" False] (Just [Column "Data.Aeson.Types.Internal.Value" "jsonb" True])]
+            `shouldReturn` (ExitSuccess, "")
 
     -- It runs, but whatever it was meant to do with $1, it does not.
     itWithOuter "rejects a statement that does not use a parameter the Haskell type sends" \conn -> do
