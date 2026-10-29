@@ -15,7 +15,8 @@ import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text.Encoding
-import Hasql.Check.Inferred (Domain (..), Piece (..), Value, render)
+import Data.Vector qualified as Vector
+import Hasql.Check.Inferred (Domain (..), Value, render)
 import Hasql.Check.Inferred.TH qualified as Inferred
 import Hasql.Check.Lexer (AlexPosn (..))
 import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
@@ -27,7 +28,7 @@ import Hasql.Statement (Statement)
 import Language.Haskell.TH (runQ)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Pqi.Ffi qualified
-import System.Directory (findExecutable)
+import System.Directory (createDirectoryIfMissing, findExecutable)
 import System.Environment (getEnvironment, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -519,65 +520,49 @@ suppressionSpec = do
 -- | The SQL the inferred quoters send for a statement, given the Postgres
 -- types of its parameters and result columns.
 sent :: Text -> [Text] -> [Text] -> Either String Text
-sent sql paramTypes columnTypes = render paramTypes columnTypes <$> Inferred.pieces sql
+sent sql paramTypes columnTypes = render paramTypes columnTypes <$> Inferred.template sql
 
 
 piecesSpec :: Spec
 piecesSpec = do
-    it "annotates each parameter and result column" $
+    it "annotates each parameter, and casts each result column around the statement" $
         sent "select email, nickname from customer where id = $1" ["int8"] ["text", "text"]
-            `shouldBe` Right "SELECT (email) :: text, (nickname) :: text FROM customer WHERE id = $1 :: int8"
-
-    it "annotates an expression as a whole, and keeps its alias" $
-        sent "select a + b as total from t" [] ["int8"]
-            `shouldBe` Right "SELECT (a + b) :: int8 AS total FROM t"
+            `shouldBe` Right "WITH hasql_check_result (c1, c2) AS (SELECT email, nickname FROM customer WHERE id = $1 :: int8) SELECT c1 :: text, c2 :: text FROM hasql_check_result"
 
     it "annotates every occurrence of a parameter" $
         sent "select a from t where b = $1 or c = $1" ["int4"] ["text"]
-            `shouldBe` Right "SELECT (a) :: text FROM t WHERE b = $1 :: int4 OR c = $1 :: int4"
+            `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT a FROM t WHERE b = $1 :: int4 OR c = $1 :: int4) SELECT c1 :: text FROM hasql_check_result"
 
-    it "annotates RETURNING" $
+    it "casts RETURNING" $
         sent "update t set a = $1 returning id" ["text"] ["int8"]
-            `shouldBe` Right "UPDATE t SET a = $1 :: text RETURNING (id) :: int8"
+            `shouldBe` Right "WITH hasql_check_result (c1) AS (UPDATE t SET a = $1 :: text RETURNING id) SELECT c1 :: int8 FROM hasql_check_result"
 
-    it "annotates both sides of a UNION" $
-        sent "select a from t union all select b from u" [] ["int8"]
-            `shouldBe` Right "SELECT (a) :: int8 FROM t UNION ALL SELECT (b) :: int8 FROM u"
-
-    it "leaves the result columns behind a * alone" $
+    it "casts the columns behind a *" $
         sent "select * from t where id = $1" ["int8"] ["int8", "text"]
-            `shouldBe` Right "SELECT * FROM t WHERE id = $1 :: int8"
+            `shouldBe` Right "WITH hasql_check_result (c1, c2) AS (SELECT * FROM t WHERE id = $1 :: int8) SELECT c1 :: int8, c2 :: text FROM hasql_check_result"
 
-    it "leaves the result columns behind a qualified * alone" $
-        sent "select t.*, (r).* from t" [] ["int8", "text"]
-            `shouldBe` Right "SELECT t.*, (r).* FROM t"
+    it "leaves the statement itself as it is: its DISTINCT ON, ORDER BY and GROUP BY" $
+        sent "select distinct on (t.id) t.id from t group by 1 order by id" [] ["int8"]
+            `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT DISTINCT ON (t.id) t.id FROM t GROUP BY 1 ORDER BY id) SELECT c1 :: int8 FROM hasql_check_result"
 
-    it "leaves SELECT DISTINCT ordered by output column names, which annotating keeps" $
-        sent "select distinct id, name from t order by id, name desc" [] ["int8", "text"]
-            `shouldBe` Right "SELECT DISTINCT (id) :: int8, (name) :: text FROM t ORDER BY id, name DESC"
+    it "keeps the statement's own WITH list first, where a data-modifying one must be" $
+        sent "with x as (update t set a = $1 returning a) select a from x" ["int8"] ["int8"]
+            `shouldBe` Right "WITH x AS (UPDATE t SET a = $1 :: int8 RETURNING a), hasql_check_result (c1) AS (SELECT a FROM x) SELECT c1 :: int8 FROM hasql_check_result"
 
-    it "orders SELECT DISTINCT by an annotated column it names otherwise" $
-        sent "select distinct t.id, id + 1 as k from t order by t.id, id + 1" [] ["int8", "int8"]
-            `shouldBe` Right "SELECT DISTINCT (t.id) :: int8, (id + 1) :: int8 AS k FROM t ORDER BY (t.id) :: int8, (id + 1) :: int8"
-
-    it "leaves an ORDER BY name that an alias gives another column alone" $
-        sent "select distinct id as key, label as id from t order by id" [] ["int8", "text"]
-            `shouldBe` Right "SELECT DISTINCT (id) :: int8 AS key, (label) :: text AS id FROM t ORDER BY id"
+    it "picks a name the statement does not use" $
+        sent "select a from hasql_check_result" [] ["int8"]
+            `shouldBe` Right "WITH hasql_check_result_ (c1) AS (SELECT a FROM hasql_check_result) SELECT c1 :: int8 FROM hasql_check_result_"
 
     it "keeps text in a literal that looks like an annotation" $
-        sent "select ' :: hasql_check_slot_c1'" [] ["text"]
-            `shouldBe` Right "SELECT (' :: hasql_check_slot_c1') :: text"
+        sent "select ' :: hasql_check_slot_1'" [] ["text"]
+            `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT ' :: hasql_check_slot_1') SELECT c1 :: text FROM hasql_check_result"
 
-    it "leaves a column the Haskell type does not read unannotated" $
-        sent "select a, b from t" [] ["int8"]
-            `shouldBe` Right "SELECT (a) :: int8, (b) FROM t"
-
-    it "cuts the statement where the annotations go" $
-        Inferred.pieces "select a from t where b = $1"
-            `shouldBe` Right [Sql "SELECT (a)", ColumnType 1, Sql " FROM t WHERE b = $1", ParamType 1]
+    it "sends a statement without rows as it is" $
+        sent "delete from t where id = $1" ["int8"] []
+            `shouldBe` Right "DELETE FROM t WHERE id = $1 :: int8"
 
     it "rejects SQL it cannot parse" $
-        Inferred.pieces "select from where" `shouldSatisfy` isLeft
+        Inferred.template "select from where" `shouldSatisfy` isLeft
 
 
 newtype Label = Label Text
@@ -621,6 +606,18 @@ runtimeSpec = do
     itWithOuter "keeps the order of SELECT DISTINCT by an alias" \conn ->
         runStatement conn () [Inferred.singletonStatement|select distinct id as key, label as id from (values (2, 'a'), (1, 'b')) v (id, label) order by id limit 1|]
             `shouldReturn` (2 :: Int64, "a" :: Text)
+
+    itWithOuter "runs SELECT DISTINCT ON, ordered by an output name, with a cast column" \conn ->
+        runStatement conn () [Inferred.vectorStatement|select distinct on (t.id) t.id from tag t where t.id = 1 order by id|]
+            `shouldReturn` Vector.fromList [1 :: Int64]
+
+    itWithOuter "runs GROUP BY a primary key, with a cast column" \conn ->
+        runStatement conn () [Inferred.vectorStatement|select id, label from tag where id = 1 group by 1|]
+            `shouldReturn` Vector.fromList [(1 :: Int64, "red" :: Text)]
+
+    itWithOuter "runs a statement that does not use all its parameters" \conn ->
+        runStatement conn (1 :: Int64, 2 :: Int64) [Inferred.singletonStatement|select $2|]
+            `shouldReturn` (2 :: Int64)
 
     itWithOuter "reads a newtype as the type it wraps" \conn ->
         runStatement conn (1 :: Int32) [Inferred.singletonStatement|select label from tag where id = $1|]
@@ -701,10 +698,9 @@ inferredSpec = do
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("the statement returns 2 columns, but the Haskell type reads 1" `isInfixOf`)
 
-    itWithOuter "rejects a column behind a * of another type" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select * from tag" [] (Just [int64, text])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("column 1 (id) is integer, but is read as GHC.Internal.Int.Int64" `isInfixOf`)
+    itWithOuter "accepts the columns behind a *, cast to the types read" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select * from tag" [] (Just [int64, text])]
+            `shouldReturn` (ExitSuccess, "")
 
     itWithOuter "accepts a qualified * whose columns have the types read" \conn ->
         runInferred conn [] [inferredQuote "vectorStatement" "select a.* from account a" [] (Just [int32, text, optional text])]
@@ -718,15 +714,42 @@ inferredSpec = do
         runInferred conn [] [inferredQuote "vectorStatement" "select distinct t.id, t.id + 1 from tag t order by t.id, t.id + 1" [] (Just [int64, int64])]
             `shouldReturn` (ExitSuccess, "")
 
-    itWithOuter "rejects a Haskell type that sends more parameters than the statement takes" \conn -> do
+    itWithOuter "accepts statements that a cast in place would break" \conn ->
+        runInferred
+            conn
+            []
+            [ inferredQuote "vectorStatement" "select distinct on (t.id) t.id from tag t order by id" [] (Just [int64])
+            , inferredQuote "vectorStatement" "select id, label from tag group by 1" [] (Just [int64, text])
+            ]
+            `shouldReturn` (ExitSuccess, "")
+
+    -- It runs, but whatever it was meant to do with $1, it does not.
+    itWithOuter "rejects a statement that does not use a parameter the Haskell type sends" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select $2" [int64, int64] (Just [int64])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("the Haskell type sends parameter $1, which the statement does not use" `isInfixOf`)
+        out `shouldNotSatisfy` ("could not determine" `isInfixOf`)
+
+    itWithOuter "checks a quote in a source file it also has from --inferred once, as inferred" \conn ->
+        withSystemTempDirectory "hasql-check-both" \dir -> do
+            let source = dir </> "src" </> "Fixture.hs"
+                quotesFile = dir </> "quotes.jsonl"
+            createDirectoryIfMissing True (dir </> "src")
+            -- Line 3, with the quote at column 7, as the inferred quote says.
+            writeFile source "module Fixture where\n\ng =   [singletonStatement|select $1 + $2|]\n"
+            ByteString.Lazy.writeFile quotesFile (ByteString.Lazy.fromStrict (Text.Encoding.encodeUtf8 (inferredQuote "singletonStatement" "select $1 + $2" [int64, int64] (Just [int64]))))
+            (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" ["--database", Text.unpack conn, source, "--inferred", quotesFile]) ""
+            (code, out <> err) `shouldBe` (ExitSuccess, "")
+
+    itWithOuter "rejects a Haskell type that sends more parameters than the statement uses" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 1" [int64] (Just [int32])]
         code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("the statement takes 0 parameters, but the Haskell type sends 1" `isInfixOf`)
+        out `shouldSatisfy` ("the Haskell type sends parameter $1, which the statement does not use" `isInfixOf`)
 
     itWithOuter "rejects a Haskell type that sends fewer, without rows too" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "delete from tag where id = $1" [] Nothing]
         code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("the statement takes 1 parameter, but the Haskell type sends 0" `isInfixOf`)
+        out `shouldSatisfy` ("the statement uses $1, but the Haskell type sends 0 parameters" `isInfixOf`)
 
     itWithOuter "accepts a column of a domain, read as a newtype deriving it" \conn ->
         runInferred conn [] [inferredQuote "singletonStatement" "select price from ledger" [] (Just [Column "Shop.Cents" "cents" True])]

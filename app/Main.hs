@@ -12,12 +12,13 @@ import Control.Applicative ((<|>))
 import Control.Monad (forM, forM_, when)
 import Data.ByteString qualified
 import Data.Either (isLeft, rights)
+import Data.List (isSuffixOf)
 import Data.Text (Text)
 import Data.Text qualified
 import Data.Text.Encoding qualified
 import Hasql.Check
 import Hasql.Check.Finding
-import Hasql.Check.Inferred.Quote (Inferred (..), annotated, checkShape, readInferred)
+import Hasql.Check.Inferred.Quote (Inferred (..), annotated, checkSent, readInferred)
 import Hasql.Check.Lexer
 import Hasql.Check.Nullability qualified as Nullability
 import Hasql.Check.Parser
@@ -33,6 +34,7 @@ import System.Directory (doesFileExist)
 import System.Environment (getArgs, getProgName)
 import System.Environment qualified
 import System.Exit (ExitCode (ExitFailure), exitSuccess, exitWith)
+import System.FilePath (splitDirectories)
 import System.IO (hPutStr, hPutStrLn, stderr)
 import Prelude hiding (lex)
 
@@ -260,6 +262,21 @@ inHaskellTerms m =
     t = Data.Text.pack m
 
 
+-- | Whether a quote found in a source file is one --inferred has: its
+-- quoter has the same names as hasql-th's. The paths may be relative to
+-- different directories, so one need only end with the other.
+isInferred :: [(FilePath, Either String [(QuasiQuote, Maybe Inferred)])] -> (FilePath, QuasiQuote) -> Bool
+isInferred inferredQuotes (file, QuasiQuote (AlexPn _ line column, _) _) =
+    or
+        [ q.line == line && q.column == column && sameFile q.file
+        | (_, Right quotes) <- inferredQuotes
+        , (_, Just q) <- quotes
+        ]
+  where
+    sameFile other = components other `isSuffixOf` components file || components file `isSuffixOf` components other
+    components = filter (`notElem` ["", "."]) . splitDirectories
+
+
 location :: FilePath -> QuasiQuote -> String
 location file (QuasiQuote (AlexPn _ quoterRow quoterCol, _) _) =
     file <> ":" <> show quoterRow <> ":" <> show quoterCol
@@ -268,7 +285,9 @@ location file (QuasiQuote (AlexPn _ quoterRow quoterCol, _) _) =
 main :: IO ()
 main = do
     (opts, fileList) <- execOpts
-    parsed <- (<>) <$> collect (opts.extraQuoters <> quotersSupported) fileList <*> collectInferred (reverse opts.inferred)
+    fromSources <- collect (opts.extraQuoters <> quotersSupported) fileList
+    inferredQuotes <- collectInferred (reverse opts.inferred)
+    let parsed = [(file, filter (\(qq, _) -> not (isInferred inferredQuotes (file, qq))) <$> quotes) | (file, quotes) <- fromSources] <> inferredQuotes
     if opts.listOnly
         then do
             forM_ parsed \case
@@ -297,17 +316,18 @@ main = do
                         exists <- doesFileExist file
                         fileLines <- if exists then Data.Text.lines . Data.Text.Encoding.decodeUtf8Lenient <$> Data.ByteString.readFile file else pure []
                         forM qqs \(qq@(QuasiQuote (AlexPn _ line _, quoter) (_, stmt)), inferredQuote) -> do
-                            errShape <- maybe (pure []) (checkShape libPqConn) inferredQuote
-                            errPrepare <-
-                                if null errShape
-                                    then Hasql.Check.prepare libPqConn "" stmt
-                                    else pure (Left (unlines errShape))
+                            -- An inferred quote is checked as it is sent;
+                            -- the annotated statement it stands for is for
+                            -- the warnings.
+                            errPrepare <- case inferredQuote of
+                                Just q -> (\errs -> if null errs then Right () else Left (unlines errs)) <$> checkSent libPqConn q
+                                Nothing -> Hasql.Check.prepare libPqConn "" stmt
                             case errPrepare of
                                 Left err -> do
                                     putStrLn ("Error in " <> location file qq)
                                     putStrLn err
                                     pure (Left (DbError qq err))
-                                Right _ -> case (catalogue, parseStmt stmt) of
+                                Right _ -> case (catalogue, maybe parseStmt (const (parsePlainStmt True)) inferredQuote stmt) of
                                     (Just cat, Right ast) -> do
                                         let checkedRules =
                                                 [Nullable | opts.nullability && isQuoterIn Nullability.resultQuoters quoter]

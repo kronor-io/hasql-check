@@ -368,16 +368,19 @@ profile :: Statement Int64 (Maybe (Text, Maybe Text))
 profile = [maybeStatement| select email, nickname from customer where id = $1 |]
 ```
 
-The quoter sends the statement with the annotations hasql-th would have
-asked for:
+The quoter annotates the parameters, and casts the result columns to the
+types they are read as, in a projection around the statement:
 
 ```sql
-SELECT (email) :: text, (nickname) :: text FROM customer WHERE id = $1 :: int8
+WITH hasql_check_result (c1, c2) AS (SELECT email, nickname FROM customer WHERE id = $1 :: int8)
+SELECT c1 :: text, c2 :: text FROM hasql_check_result
 ```
 
-The annotations are casts, so a `varchar` column can be read as `Text` and an
-`int4` one as `Int64`. Without them, hasql's decoders need the exact type, and
-fail at runtime.
+So a `varchar` column can be read as `Text` and an `int4` one as `Int64`, and
+without them hasql's decoders need the exact type, and fail at runtime. The
+statement itself is left as written, so its `DISTINCT ON`, `ORDER BY` and
+`GROUP BY` mean what they did, and a `*` is cast too. A `WITH` list of its own
+goes first, where a data-modifying statement in it must be.
 
 The type does not have to be on the binding. GHC infers it from how the rows
 are used, as it does for any other value:
@@ -478,12 +481,18 @@ Warning in src/Shop/Orders.hs:21:15
 
 Each statement is checked as the annotated hasql-th statement it is sent as,
 so everything above applies: errors, directives, baselines and
-`--fail-on-warnings`. It also fails when the Haskell type sends a different
-number of parameters than the statement takes, or reads a different number of
-columns than it returns, and when a column must be converted in a way that
-can fail. Postgres converts a value to almost any type when told to, even
-`'abc'` to a number, so the annotation on a column must not be the only thing
-that makes it fit:
+`--fail-on-warnings`. The statement is prepared as it is sent, with the
+parameter types hasql sends. It also fails when the Haskell type reads a
+different number of columns than the statement returns, and when it sends a
+parameter the statement does not use: the statement runs, but whatever the
+parameter was for, a filter say, does not happen.
+
+A quote that is both in a source file you pass and in `--inferred` is checked
+once, as inferred.
+
+It also fails when a column must be converted in a way that can fail.
+Postgres converts a value to almost any type when told to, even `'abc'` to a
+number, so the cast must not be the only thing that makes a column fit:
 
 ```haskell
 newtype Nickname = Nickname Int64
@@ -555,9 +564,9 @@ The warnings go to stderr in GHC's format, rather than through GHC, so
 - They need the plan, so a statement that reads a session setting the
   connection lacks is only partly checked; see [Running it in CI](#running-it-in-ci).
 - The quoters without annotations do not take arrays, enums or composite
-  types yet. Behind a `*` or `t.*`
-  they cannot annotate the result columns, which must then have exactly the
-  types the Haskell values are read as.
+  types yet. A `CALL` cannot be
+  wrapped, so its result columns must have exactly the types they are read
+  as.
 - The default build parses statements as upstream hasql-th does. Building with
   the `kronor-syntax` flag instead accepts the Haskell targets
   (`$f (a :: int8)`) and parameter fields (`$1.$field`) of Kronor's hasql-th
