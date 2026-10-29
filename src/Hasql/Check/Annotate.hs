@@ -18,15 +18,18 @@
 module Hasql.Check.Annotate (
     Slot (..),
     annotate,
+    annotatesResults,
     typename,
+    placeholder,
 ) where
 
 import Data.Data (Data, cast, gmapT)
 import Data.Foldable (toList)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
+import Data.Text qualified as Text
 import PostgresqlSyntax qualified as Ast
 import Prelude
 
@@ -37,10 +40,19 @@ data Slot = Param Int | Column Int
     deriving stock (Eq, Show)
 
 
--- | A type name, nullable or not.
-typename :: Text -> Bool -> Ast.Typename
-typename name nullable =
-    Ast.Typename False (Ast.GenericTypeSimpleTypename (Ast.GenericType (Ast.UnquotedIdent name) Nothing Nothing)) nullable Nothing
+-- | A type, as an annotation would name it - @int8@, @public.payment_state@,
+-- @text[]@ - nullable or not. An array's nullability is its elements'.
+typename :: Text -> Bool -> Either String Ast.Typename
+typename name nullable = case Ast.parse mempty name of
+    Right (Ast.Typename setof t _ Nothing) -> Right (Ast.Typename setof t nullable Nothing)
+    Right (Ast.Typename setof t _ (Just (dimensions, _))) -> Right (Ast.Typename setof t False (Just (dimensions, nullable)))
+    Left _ -> Left ("not a Postgres type name: " <> Text.unpack name)
+
+
+-- | A made-up type with a plain name, to find in the rendered statement.
+placeholder :: Text -> Ast.Typename
+placeholder name =
+    Ast.Typename False (Ast.GenericTypeSimpleTypename (Ast.GenericType (Ast.UnquotedIdent name) Nothing Nothing)) False Nothing
 
 
 -- | The statement with each occurrence of a parameter, and each result
@@ -54,6 +66,11 @@ annotate :: (Slot -> Maybe Ast.Typename) -> Ast.PreparableStmt -> Ast.Preparable
 annotate slot stmt =
     let withParams = params slot stmt
      in fromMaybe withParams (results slot withParams)
+
+
+-- | Whether 'annotate' can annotate the statement's result columns.
+annotatesResults :: Ast.PreparableStmt -> Bool
+annotatesResults = isJust . results (const (Just (placeholder "t")))
 
 
 -- * Parameters

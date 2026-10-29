@@ -27,12 +27,14 @@ import Control.Monad (unless)
 import Data.Char (ord)
 import Data.List (intercalate)
 import Data.Map qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import GHC.Data.FastString (getLexicalFastString, unpackFS)
 import GHC.Iface.Ext.Binary (HieFileResult (..), readHieFile)
 import GHC.Iface.Ext.Types
 import GHC.Iface.Ext.Utils (recoverFullType)
-import GHC.Iface.Type (IfaceTyCon (..))
+import GHC.Iface.Type (IfaceTyCon (..), IfaceTyLit (..))
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Cache (initNameCache)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -45,7 +47,7 @@ import System.IO (hPutStrLn, stderr)
 import Text.Printf (printf)
 
 
-data Ty = Con String String [Ty] | Var
+data Ty = Con String String [Ty] | Lit String | Var
 
 
 main :: IO ()
@@ -67,15 +69,21 @@ main = do
                 ( \(s, here) ->
                     let params = [p | Con "Hasql.Check.Inferred" "Params" [p] <- here]
                         rows = [r | Con "Hasql.Check.Inferred" "Row" [r] <- here]
+                        paramNames = [ns | Con "Hasql.Check.Inferred" "PostgresParams" [l] <- here, Just ns <- [symbols l]]
+                        columnNames = [ns | Con "Hasql.Check.Inferred" "PostgresColumns" [l] <- here, Just ns <- [symbols l]]
                         -- The enclosing declarations hold the same
                         -- dictionaries, but only the quote's own span starts
                         -- after "[quoter|".
                         at = quoteAt source (srcSpanStartLine s, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s)
                         location q = hie_hs_file hf <> ":" <> show (srcSpanStartLine s) <> ":" <> show q.column
                      in case (at, typesOf ground params rows) of
-                            (Just q, Resolved p r) -> [] <$ putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q p r)
-                            (Just q, Unresolved) -> pure [unresolved (location q)]
-                            _ -> pure []
+                            (Just _, NotInferred) -> pure []
+                            (Just q, Resolved p r)
+                                | Just names <- listToMaybe paramNames
+                                , Just row <- traverse (\r' -> (r',) <$> listToMaybe columnNames) r ->
+                                    [] <$ putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q (p, names) row)
+                            (Just q, _) -> pure [unresolved (location q)]
+                            (Nothing, _) -> pure []
                 )
                 (Map.toList found)
 
@@ -95,7 +103,7 @@ main = do
 
 
 -- | One quote's line of output.
-output :: FilePath -> Int -> Quote -> Ty -> Maybe Ty -> String
+output :: FilePath -> Int -> Quote -> (Ty, [String]) -> Maybe (Ty, [String]) -> String
 output file line q params row =
     object
         [ ("file", string file)
@@ -103,26 +111,42 @@ output file line q params row =
         , ("column", show q.column)
         , ("quoter", string q.quoter)
         , ("sql", string q.body)
-        , ("params", columns True params)
-        , ("row", maybe "null" (columns False) row)
+        , ("params", uncurry (columns True) params)
+        , ("row", maybe "null" (uncurry (columns False)) row)
         ]
 
 
--- | A parameter or row type, as the list of its columns.
-columns :: Bool -> Ty -> String
-columns isParams = \case
-    Con _ "Unit" [] | isParams -> "[]"
-    Con _ name args | take 5 name == "Tuple" -> list (map column args)
-    t -> list [column t]
+-- | A parameter or row type, as the list of its columns, with the Postgres
+-- type of each.
+columns :: Bool -> Ty -> [String] -> String
+columns isParams t names = list (zipWith column (split t) names)
   where
-    column = \case
-        Con _ "Maybe" [t] -> one t True
-        t -> one t False
-    one t nullable = object [("type", string (qualified t)), ("nullable", if nullable then "true" else "false")]
+    split = \case
+        Con _ "Unit" [] | isParams -> []
+        Con _ name args | take 5 name == "Tuple" -> args
+        other -> [other]
+    column c postgres = case c of
+        Con _ "Maybe" [inner] -> one inner postgres True
+        _ -> one c postgres False
+    one c postgres nullable =
+        object
+            [ ("type", string (qualified c))
+            , ("postgres", string postgres)
+            , ("nullable", if nullable then "true" else "false")
+            ]
     qualified = \case
         Con m n _ -> if null m then n else m <> "." <> n
+        Lit s -> show s
         Var -> "?"
     list xs = "[" <> intercalate "," xs <> "]"
+
+
+-- | A type-level list of strings.
+symbols :: Ty -> Maybe [String]
+symbols = \case
+    Con _ ":" [Lit s, rest] -> (s :) <$> symbols rest
+    Con _ "[]" [] -> Just []
+    _ -> Nothing
 
 
 convert :: HieTypeFix -> Ty
@@ -131,6 +155,7 @@ convert (Roll t) = case t of
     HQualTy _ b -> convert b
     HForAllTy _ b -> convert b
     HCastTy a -> convert a
+    HLitTy (IfaceStrTyLit s) -> Lit (unpackFS (getLexicalFastString s))
     _ -> Var
   where
     names :: Name -> (String, String)
@@ -140,6 +165,7 @@ convert (Roll t) = case t of
 ground :: Ty -> Bool
 ground = \case
     Var -> False
+    Lit _ -> True
     Con _ _ args -> all ground args
 
 

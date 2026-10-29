@@ -1,5 +1,8 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Main where
 
@@ -12,7 +15,7 @@ import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text.Encoding
-import Hasql.Check.Inferred (Piece (..), render)
+import Hasql.Check.Inferred (Domain (..), Piece (..), Value, render)
 import Hasql.Check.Inferred.TH qualified as Inferred
 import Hasql.Check.Lexer (AlexPosn (..))
 import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
@@ -577,6 +580,16 @@ piecesSpec = do
         Inferred.pieces "select from where" `shouldSatisfy` isLeft
 
 
+newtype Label = Label Text
+    deriving stock (Eq, Show)
+    deriving newtype (Value)
+
+
+newtype Cents = Cents Int64
+    deriving stock (Eq, Show)
+    deriving (Value) via Domain "cents" Int64
+
+
 -- | Run a statement on the test database.
 runStatement :: Text -> params -> Statement params result -> IO result
 runStatement conn params statement = do
@@ -609,14 +622,22 @@ runtimeSpec = do
         runStatement conn () [Inferred.singletonStatement|select distinct id as key, label as id from (values (2, 'a'), (1, 'b')) v (id, label) order by id limit 1|]
             `shouldReturn` (2 :: Int64, "a" :: Text)
 
+    itWithOuter "reads a newtype as the type it wraps" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select label from tag where id = $1|]
+            `shouldReturn` Label "red"
+
+    itWithOuter "sends and reads a newtype as the domain it derives" \conn ->
+        runStatement conn (Cents 5) [Inferred.singletonStatement|select $1|]
+            `shouldReturn` Cents 5
+
     itWithOuter "runs a statement without rows" \conn ->
         runStatement conn ("blue" :: Text, 2 :: Int64) [Inferred.resultlessStatement|insert into tag (label, id) values ($1, $2)|]
             `shouldReturn` ()
 
 
--- | A quote as hasql-check-hie writes it: its SQL, and the qualified names of
--- its parameter and result types, a nullable one prefixed with "?".
-inferredQuote :: Text -> Text -> [Text] -> Maybe [Text] -> Text
+-- | A quote as hasql-check-hie writes it: its SQL, and the qualified name and
+-- Postgres type of each parameter and result column.
+inferredQuote :: Text -> Text -> [Column] -> Maybe [Column] -> Text
 inferredQuote quoter sql params row =
     "{\"file\":\"src/Fixture.hs\",\"line\":3,\"column\":7,\"quoter\":\""
         <> quoter
@@ -629,9 +650,22 @@ inferredQuote quoter sql params row =
         <> "}"
   where
     columns cs = "[" <> Text.intercalate "," (map column cs) <> "]"
-    column c = case Text.stripPrefix "?" c of
-        Just t -> "{\"type\":\"" <> t <> "\",\"nullable\":true}"
-        Nothing -> "{\"type\":\"" <> c <> "\",\"nullable\":false}"
+    column c =
+        "{\"type\":\""
+            <> c.haskell
+            <> "\",\"postgres\":\""
+            <> c.postgres
+            <> "\",\"nullable\":"
+            <> (if c.nullable then "true" else "false")
+            <> "}"
+
+
+data Column = Column {haskell :: Text, postgres :: Text, nullable :: Bool}
+
+
+-- | The same column, as a 'Maybe'.
+optional :: Column -> Column
+optional c = c{nullable = True}
 
 
 -- | Run with --inferred on the given quotes and flags.
@@ -644,10 +678,10 @@ runInferred conn args quotes' =
         pure (code, out <> err)
 
 
-int32, int64, text :: Text
-int32 = "GHC.Internal.Int.Int32"
-int64 = "GHC.Internal.Int.Int64"
-text = "Data.Text.Internal.Text"
+int32, int64, text :: Column
+int32 = Column "GHC.Internal.Int.Int32" "int4" False
+int64 = Column "GHC.Internal.Int.Int64" "int8" False
+text = Column "Data.Text.Internal.Text" "text" False
 
 
 inferredSpec :: TestDef '[Text] ()
@@ -673,7 +707,7 @@ inferredSpec = do
         out `shouldSatisfy` ("column 1 (id) is integer, but is read as GHC.Internal.Int.Int64" `isInfixOf`)
 
     itWithOuter "accepts a qualified * whose columns have the types read" \conn ->
-        runInferred conn [] [inferredQuote "vectorStatement" "select a.* from account a" [] (Just [int32, text, "?" <> text])]
+        runInferred conn [] [inferredQuote "vectorStatement" "select a.* from account a" [] (Just [int32, text, optional text])]
             `shouldReturn` (ExitSuccess, "")
 
     itWithOuter "accepts SELECT DISTINCT ordered by a column it annotates" \conn ->
@@ -694,17 +728,26 @@ inferredSpec = do
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("the statement takes 1 parameter, but the Haskell type sends 0" `isInfixOf`)
 
-    itWithOuter "rejects a Haskell type it knows no Postgres type for" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just ["Shop.Email"])]
+    itWithOuter "accepts a column of a domain, read as a newtype deriving it" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select price from ledger" [] (Just [Column "Shop.Cents" "cents" True])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects a column Postgres converts to the type read only when told to" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "vectorStatement" "select name from account" [] (Just [Column "Shop.Nickname" "int8" False])]
         code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("src/Fixture.hs:3:7: no Postgres type is known for Shop.Email" `isInfixOf`)
+        out `shouldSatisfy` ("column 1 (name) is text, but is read as Shop.Nickname (bigint), which Postgres converts it to only when told to" `isInfixOf`)
+
+    itWithOuter "rejects a Postgres type the database does not have" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("type \"nosuchtype\" does not exist" `isInfixOf`)
 
     itWithOuter "warns about a nullable column read without a Maybe" \conn -> do
         (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [text])]
         out `shouldSatisfy` ("column 1 (nickname) is not a Maybe in Haskell, but public.account.nickname is nullable" `isInfixOf`)
 
     itWithOuter "accepts a nullable column read as a Maybe" \conn ->
-        runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just ["?" <> text])]
+        runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [optional text])]
             `shouldReturn` (ExitSuccess, "")
 
     itWithOuter "warns about a column read as a narrower type" \conn -> do

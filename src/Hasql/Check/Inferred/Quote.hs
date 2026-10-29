@@ -29,10 +29,9 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word32)
-import Hasql.Check (parseStmt, quoterSettings)
-import Hasql.Check.Annotate (annotate, typename)
+import Hasql.Check (parseStmt, quoterSettings, renderStmt)
+import Hasql.Check.Annotate (annotate, annotatesResults, typename)
 import Hasql.Check.Annotate qualified as Slot
-import Hasql.Check.Inferred (known)
 import Hasql.Check.Nullability (query)
 import PostgresqlSyntax qualified as Ast
 import Pqi qualified
@@ -56,6 +55,8 @@ data Inferred = Inferred
 -- whether it is a 'Maybe'.
 data Column = Column
     { haskellType :: Text
+    , postgresType :: Text
+    -- ^ As GHC worked it out from the Haskell type's 'Hasql.Check.Inferred.PgType'.
     , nullable :: Bool
     }
 
@@ -73,7 +74,7 @@ instance Aeson.FromJSON Inferred where
 
 
 instance Aeson.FromJSON Column where
-    parseJSON = Aeson.withObject "column" \o -> Column <$> o .: "type" <*> o .: "nullable"
+    parseJSON = Aeson.withObject "column" \o -> Column <$> o .: "type" <*> o .: "postgres" <*> o .: "nullable"
 
 
 -- | Quotes, one JSON object a line.
@@ -86,66 +87,100 @@ readInferred contents =
 
 -- | The hasql-th quote the inferred one stands for.
 annotated :: Inferred -> Either String Text
-annotated q = do
+annotated q = Ast.toText quoterSettings . fst <$> annotatedAst True q
+
+
+-- | The statement, annotated - its result columns too, if asked - and
+-- whether its result columns could be.
+annotatedAst :: Bool -> Inferred -> Either String (Ast.PreparableStmt, Bool)
+annotatedAst withResults q = do
     stmt <- parseStmt q.sql
-    params <- traverse postgresType q.params
-    row <- traverse (traverse postgresType) q.row
+    params <- traverse column q.params
+    row <- traverse (traverse column) q.row
     let slot = \case
             Slot.Param n -> at n params
-            Slot.Column n -> at n =<< row
+            Slot.Column n | withResults -> at n =<< row
+            Slot.Column _ -> Nothing
         at n xs = case drop (n - 1) xs of
-            (name, nullable) : _ | n >= 1 -> Just (typename name nullable)
+            t : _ | n >= 1 -> Just t
             _ -> Nothing
-    pure (Ast.toText quoterSettings (annotate slot stmt))
-
-
-postgresType :: Column -> Either String (Text, Bool)
-postgresType c = case lookup c.haskellType known of
-    Just name -> Right (name, c.nullable)
-    Nothing ->
-        Left
-            ( "no Postgres type is known for "
-                <> Text.unpack c.haskellType
-                <> "; the checker knows "
-                <> Text.unpack (Text.intercalate ", " (map fst known))
-            )
+    pure (annotate slot stmt, annotatesResults stmt)
+  where
+    column c = typename c.postgresType c.nullable
 
 
 -- | Whether the statement takes as many parameters as the Haskell type
--- sends, and returns as many columns as it reads, each of the type it is
--- read as. Annotated columns always are; a column behind a @*@ is not
--- annotated, and must already be.
-checkShape :: Pqi.Connection -> Inferred -> ByteString -> IO [String]
-checkShape conn q rendered = do
-    expected <- traverse (oid . fst) =<< either (const (pure [])) pure (traverse postgresType (concat q.row))
-    prepared <- conn.prepare "" rendered Nothing
-    status <- maybe (pure Pqi.FatalError) (.resultStatus) prepared
-    if status /= Pqi.CommandOk
-        then pure []
-        else
-            conn.describePrepared "" >>= \case
-                Nothing -> pure []
-                Just d -> do
-                    nparams <- d.nparams
-                    n <- d.nfields
-                    found <- traverse (\i -> (,) <$> (maybe "?column?" (Text.unpack . Text.decodeUtf8Lenient) <$> d.fname i) <*> d.ftype i) [0 .. n - 1]
-                    let paramErrors =
-                            [ "the statement takes " <> count "parameter" (fromIntegral nparams) <> ", but the Haskell type sends " <> show (length q.params)
-                            | fromIntegral nparams /= length q.params
-                            ]
-                    columnErrors <- case q.row of
-                        Nothing -> pure []
-                        Just row
-                            | length found /= length row ->
-                                pure ["the statement returns " <> count "column" (length found) <> ", but the Haskell type reads " <> show (length row)]
-                            | otherwise ->
-                                sequence
-                                    [ (\pg -> "column " <> show i <> " (" <> name <> ") is " <> pg <> ", but is read as " <> Text.unpack c.haskellType) <$> nameOf t
-                                    | (i :: Int, c, (name, t), Just e) <- zip4 [1 ..] row found expected
-                                    , t /= e
-                                    ]
-                    pure (paramErrors <> columnErrors)
+-- sends, and returns as many columns as it reads, each of a type it can be
+-- read as.
+--
+-- An annotated column is cast to the type it is read as, and Postgres casts
+-- anything it can convert, even text to a number, which fails at runtime for
+-- text that is not one. So the column must have that type already, or one
+-- Postgres converts to it without being told to: implicitly, or on
+-- assignment. A column behind a @*@ is not annotated, and must already have
+-- the type.
+checkShape :: Pqi.Connection -> Inferred -> IO [String]
+checkShape conn q = case annotatedAst False q of
+    Left _ -> pure []
+    Right (paramsOnly, annotatable) -> do
+        expected <- traverse (oid . (.postgresType)) (concat q.row)
+        prepared <- conn.prepare "" (renderStmt paramsOnly) Nothing
+        status <- maybe (pure Pqi.FatalError) (.resultStatus) prepared
+        if status /= Pqi.CommandOk
+            then pure []
+            else
+                conn.describePrepared "" >>= \case
+                    Nothing -> pure []
+                    Just d -> do
+                        nparams <- d.nparams
+                        n <- d.nfields
+                        found <- traverse (\i -> (,) <$> (maybe "?column?" (Text.unpack . Text.decodeUtf8Lenient) <$> d.fname i) <*> d.ftype i) [0 .. n - 1]
+                        let paramErrors =
+                                [ "the statement takes " <> count "parameter" (fromIntegral nparams) <> ", but the Haskell type sends " <> show (length q.params)
+                                | fromIntegral nparams /= length q.params
+                                ]
+                        columnErrors <- case q.row of
+                            Nothing -> pure []
+                            Just row
+                                | length found /= length row ->
+                                    pure ["the statement returns " <> count "column" (length found) <> ", but the Haskell type reads " <> show (length row)]
+                                | otherwise ->
+                                    fmap concat . sequence $
+                                        [ columnError annotatable i name c t e
+                                        | (i :: Int, c, (name, t), Just e) <- zip4 [1 ..] row found expected
+                                        , t /= e
+                                        ]
+                        pure (paramErrors <> columnErrors)
   where
+    columnError annotatable i name c t e = do
+        fromName <- nameOf t
+        toName <- nameOf e
+        converts <- if annotatable then convertsWithoutBeingTold t e else pure False
+        let mismatch = concat ["column ", show i, " (", name, ") is ", fromName, ", but is read as ", Text.unpack c.haskellType]
+            conversion = concat [" (", toName, "), which Postgres converts it to only when told to, and can fail to at runtime"]
+        pure [mismatch <> if annotatable then conversion else "" | not converts]
+    -- Through their base types, so that a domain converts as the type it is
+    -- over.
+    convertsWithoutBeingTold from to =
+        query
+            conn
+            ( mconcat
+                [ "SELECT (SELECT castcontext::text FROM pg_catalog.pg_cast WHERE castsource = "
+                , base from
+                , " AND casttarget = "
+                , base to
+                , "), "
+                , base from
+                , " = "
+                , base to
+                ]
+            )
+            >>= \case
+                Right [[context, same]] -> pure (same == Just "t" || context `elem` [Just "i", Just "a"])
+                _ -> pure False
+    base o =
+        let o' = ByteString.Char8.pack (show o)
+         in mconcat ["(SELECT CASE WHEN typtype = 'd' THEN typbasetype ELSE oid END FROM pg_catalog.pg_type WHERE oid = ", o', ")"]
     count :: String -> Int -> String
     count what 1 = "1 " <> what
     count what k = unwords [show k, what <> "s"]

@@ -413,6 +413,29 @@ Each Haskell type stands for one Postgres type:
 Parameters and rows are a single value or a tuple of up to eight, and `()`
 for no parameters.
 
+### Your own types
+
+A `newtype` is sent and read as the type it wraps:
+
+```haskell
+{-# LANGUAGE UndecidableInstances #-}
+
+newtype Email = Email Text
+    deriving newtype (Value)
+```
+
+For a column of a domain, derive through `Domain` and its name. The statement
+then casts to the domain, so Postgres checks its constraints on what you send:
+
+```haskell
+newtype Quantity = Quantity Int16
+    deriving (Value) via Domain "quantity" Int16
+```
+
+Each type's Postgres type is part of its `Value` instance, as the associated
+type `PgType`, so a type of your own needs nothing else to be checked.
+Deriving the instance needs `UndecidableInstances` in that module.
+
 ### Checking them
 
 The types are only known once GHC has type-checked the module, after the
@@ -455,8 +478,32 @@ Warning in src/Shop/Orders.hs:21:15
 
 Each statement is checked as the annotated hasql-th statement it is sent as,
 so everything above applies: errors, directives, baselines and
-`--fail-on-warnings`. It also fails when the Haskell type reads a different
-number of columns than the statement returns.
+`--fail-on-warnings`. It also fails when the Haskell type sends a different
+number of parameters than the statement takes, or reads a different number of
+columns than it returns, and when a column must be converted in a way that
+can fail. Postgres converts a value to almost any type when told to, even
+`'abc'` to a number, so the annotation on a column must not be the only thing
+that makes it fit:
+
+```haskell
+newtype Nickname = Nickname Int64
+    deriving newtype (Value)
+
+nicknameOf :: Statement CustomerId Nickname
+nicknameOf = [singletonStatement| select nickname from customer where id = $1 |]
+```
+
+```
+Error in src/Shop/Newtypes.hs:35:14
+column 1 (nickname) is text, but is read as Shop.Newtypes.Nickname (bigint), which Postgres converts it to only when told to, and can fail to at runtime
+```
+
+A column whose type Postgres converts on its own, `varchar` to `text` or
+`int4` to `int8`, is fine, and one that narrows is a `--types` warning.
+
+A statement whose types are only known where it is used, such as a binding of
+type `(Params p, Row r) => Statement p r`, cannot be checked:
+`hasql-check-hie` fails, naming it. Give it a concrete type.
 
 `hasql-check-hie` needs no database, so it can run inside a sandboxed build,
 such as a Nix derivation, with only the `--inferred` step outside it. The
@@ -507,8 +554,8 @@ The warnings go to stderr in GHC's format, rather than through GHC, so
   apart: `UNION`s, and `SELECT *`.
 - They need the plan, so a statement that reads a session setting the
   connection lacks is only partly checked; see [Running it in CI](#running-it-in-ci).
-- The quoters without annotations know only the types in the table above:
-  no arrays, enums, composite types or `newtype`s yet. Behind a `*` or `t.*`
+- The quoters without annotations do not take arrays, enums or composite
+  types yet. Behind a `*` or `t.*`
   they cannot annotate the result columns, which must then have exactly the
   types the Haskell values are read as.
 - The default build parses statements as upstream hasql-th does. Building with

@@ -31,7 +31,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Hasql.Check (parseStmt, renderStmt)
-import Hasql.Check.Annotate (Slot (..), annotate, typename)
+import Hasql.Check.Annotate (Slot (..), annotate, placeholder)
 import Hasql.Check.Inferred (Piece (..), resultless, statement)
 import Hasql.Decoders qualified as D
 import Language.Haskell.TH (Exp, Q)
@@ -67,7 +67,7 @@ pieces sql = do
     -- say, so that only the annotations are cut out.
     let plain = Text.decodeUtf8Lenient (renderStmt stmt)
         prefix = until (not . (`Text.isInfixOf` plain)) (<> "x_") "hasql_check_slot_"
-    pure (cutWith prefix (Text.decodeUtf8Lenient (renderStmt (annotate (\s -> Just (typename (marker prefix s) False)) stmt))))
+    pure (cutWith prefix (Text.decodeUtf8Lenient (renderStmt (annotate (Just . placeholder . marker prefix) stmt))))
   where
     marker prefix = \case
         Param n -> prefix <> "p" <> Text.pack (show n)

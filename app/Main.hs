@@ -297,9 +297,7 @@ main = do
                         exists <- doesFileExist file
                         fileLines <- if exists then Data.Text.lines . Data.Text.Encoding.decodeUtf8Lenient <$> Data.ByteString.readFile file else pure []
                         forM qqs \(qq@(QuasiQuote (AlexPn _ line _, quoter) (_, stmt)), inferredQuote) -> do
-                            errShape <- case (inferredQuote, renderSql stmt) of
-                                (Just q, Right rendered) -> checkShape libPqConn q rendered
-                                _ -> pure []
+                            errShape <- maybe (pure []) (checkShape libPqConn) inferredQuote
                             errPrepare <-
                                 if null errShape
                                     then Hasql.Check.prepare libPqConn "" stmt

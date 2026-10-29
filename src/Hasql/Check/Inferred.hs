@@ -1,5 +1,9 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE UndecidableInstances #-}
+-- 'statement' and 'resultless' name their Postgres types through equalities
+-- they do not need themselves: with them, GHC works the names out where a
+-- statement is used, which is what puts them in the .hie files.
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- |
 -- Module      : Hasql.Check.Inferred
@@ -13,39 +17,52 @@
 -- Statements whose encoders and decoders are chosen by the Haskell types they
 -- are used with, for the quoters in "Hasql.Check.Inferred.TH".
 --
--- Each Haskell type stands for one Postgres type, and the statement sends the
--- annotations hasql-th would ask for: @select email from customer@ used as a
--- @Statement Int64 Text@ is sent as @select (email)::text from customer@. A
--- @varchar@ column is then read as 'Text', and an @int4@ one as 'Int64',
--- where an exact decoder would fail.
+-- Each Haskell type stands for one Postgres type, named at the type level by
+-- 'PgType', and the statement sends the annotations hasql-th would ask for:
+-- @select email from customer@ used as a @Statement Int64 Text@ is sent as
+-- @select (email)::text from customer@. A @varchar@ column is then read as
+-- 'Text', and an @int4@ one as 'Int64', where an exact decoder would fail.
+--
+-- Because the names are types, GHC works them out where a statement is used,
+-- and records them in its @.hie@ files, where @hasql-check-hie@ reads them:
+-- a @newtype@ deriving 'Value' is checked as the type it wraps, with no list
+-- of types to keep in step.
 module Hasql.Check.Inferred (
     -- * Types
     Value (..),
+    typeName,
+    Domain (..),
     Column (..),
     Params (..),
     Row (..),
+
+    -- * Postgres types at the type level
+    PgColumnType,
+    PgParamTypes,
+    PgColumnTypes,
+    KnownSymbols (..),
+    PostgresParams,
+    PostgresColumns,
 
     -- * Statements
     Piece (..),
     statement,
     resultless,
     render,
-
-    -- * The checker's view
-    known,
 ) where
 
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int16, Int32, Int64)
+import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Time (Day, LocalTime, TimeOfDay, UTCTime)
-import Data.Typeable (Typeable, tyConModule, tyConName, typeRep, typeRepTyCon)
 import Data.UUID (UUID)
+import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Statement (Statement)
@@ -55,149 +72,172 @@ import Prelude
 
 
 -- | A Haskell type, and the Postgres type it is sent and read as.
+--
+-- A @newtype@ can derive the instance of the type it wraps:
+--
+-- > newtype Email = Email Text
+-- >     deriving newtype (Value)
 class Value a where
-    -- | The Postgres type's name, as an annotation would give it.
-    typeName :: Text
+    -- | The Postgres type's name, as an annotation would give it: @"int8"@,
+    -- @"public.payment_state"@.
+    type PgType a :: Symbol
 
 
     encodeValue :: E.Value a
     decodeValue :: D.Value a
 
 
+-- | The name of a type's Postgres type.
+typeName :: forall a. KnownSymbol (PgType a) => Text
+typeName = Text.pack (symbolVal (Proxy @(PgType a)))
+
+
 instance Value Bool where
-    typeName = "bool"
+    type PgType Bool = "bool"
     encodeValue = E.bool
     decodeValue = D.bool
 
 
 instance Value Int16 where
-    typeName = "int2"
+    type PgType Int16 = "int2"
     encodeValue = E.int2
     decodeValue = D.int2
 
 
 instance Value Int32 where
-    typeName = "int4"
+    type PgType Int32 = "int4"
     encodeValue = E.int4
     decodeValue = D.int4
 
 
 instance Value Int64 where
-    typeName = "int8"
+    type PgType Int64 = "int8"
     encodeValue = E.int8
     decodeValue = D.int8
 
 
 instance Value Float where
-    typeName = "float4"
+    type PgType Float = "float4"
     encodeValue = E.float4
     decodeValue = D.float4
 
 
 instance Value Double where
-    typeName = "float8"
+    type PgType Double = "float8"
     encodeValue = E.float8
     decodeValue = D.float8
 
 
 instance Value Scientific where
-    typeName = "numeric"
+    type PgType Scientific = "numeric"
     encodeValue = E.numeric
     decodeValue = D.numeric
 
 
 instance Value Text where
-    typeName = "text"
+    type PgType Text = "text"
     encodeValue = E.text
     decodeValue = D.text
 
 
 instance Value ByteString where
-    typeName = "bytea"
+    type PgType ByteString = "bytea"
     encodeValue = E.bytea
     decodeValue = D.bytea
 
 
 instance Value UUID where
-    typeName = "uuid"
+    type PgType UUID = "uuid"
     encodeValue = E.uuid
     decodeValue = D.uuid
 
 
 instance Value Day where
-    typeName = "date"
+    type PgType Day = "date"
     encodeValue = E.date
     decodeValue = D.date
 
 
 instance Value LocalTime where
-    typeName = "timestamp"
+    type PgType LocalTime = "timestamp"
     encodeValue = E.timestamp
     decodeValue = D.timestamp
 
 
 instance Value UTCTime where
-    typeName = "timestamptz"
+    type PgType UTCTime = "timestamptz"
     encodeValue = E.timestamptz
     decodeValue = D.timestamptz
 
 
 instance Value TimeOfDay where
-    typeName = "time"
+    type PgType TimeOfDay = "time"
     encodeValue = E.time
     decodeValue = D.time
 
 
 instance Value Aeson.Value where
-    typeName = "jsonb"
+    type PgType Aeson.Value = "jsonb"
     encodeValue = E.jsonb
     decodeValue = D.jsonb
 
 
+-- | A type sent and read as the one it wraps, under the name of a Postgres
+-- domain over it, so that Postgres checks the domain's constraints:
+--
+-- > newtype Cents = Cents Int64
+-- >     deriving (Value) via Domain "cents" Int64
+newtype Domain (name :: Symbol) a = Domain a
+
+
+instance Value a => Value (Domain name a) where
+    type PgType (Domain name a) = name
+    encodeValue = (\(Domain a) -> a) >$< encodeValue
+    decodeValue = Domain <$> decodeValue
+
+
 -- | A column or parameter, which may be NULL when it is a 'Maybe'.
 class Column a where
-    columnType :: Text
     encodeColumn :: E.NullableOrNot E.Value a
     decodeColumn :: D.NullableOrNot D.Value a
 
 
 instance {-# OVERLAPPABLE #-} Value a => Column a where
-    columnType = typeName @a
     encodeColumn = E.nonNullable encodeValue
     decodeColumn = D.nonNullable decodeValue
 
 
 instance Value a => Column (Maybe a) where
-    columnType = typeName @a
     encodeColumn = E.nullable encodeValue
     decodeColumn = D.nullable decodeValue
 
 
+-- | A column's Postgres type.
+type family PgColumnType (a :: Type) :: Symbol where
+    PgColumnType (Maybe a) = PgType a
+    PgColumnType a = PgType a
+
+
 -- | A statement's parameters: none, one, or a tuple of them.
 class Params a where
-    paramTypes :: [Text]
     params :: E.Params a
 
 
 instance Params () where
-    paramTypes = []
     params = E.noParams
 
 
 instance {-# OVERLAPPABLE #-} Column a => Params a where
-    paramTypes = [columnType @a]
     params = E.param encodeColumn
 
 
 instance (Column a, Column b) => Params (a, b) where
-    paramTypes = [columnType @a, columnType @b]
     params =
         (fst >$< E.param encodeColumn)
             <> (snd >$< E.param encodeColumn)
 
 
 instance (Column a, Column b, Column c) => Params (a, b, c) where
-    paramTypes = [columnType @a, columnType @b, columnType @c]
     params =
         ((\(x, _, _) -> x) >$< E.param encodeColumn)
             <> ((\(_, x, _) -> x) >$< E.param encodeColumn)
@@ -205,7 +245,6 @@ instance (Column a, Column b, Column c) => Params (a, b, c) where
 
 
 instance (Column a, Column b, Column c, Column d) => Params (a, b, c, d) where
-    paramTypes = [columnType @a, columnType @b, columnType @c, columnType @d]
     params =
         ((\(x, _, _, _) -> x) >$< E.param encodeColumn)
             <> ((\(_, x, _, _) -> x) >$< E.param encodeColumn)
@@ -214,7 +253,6 @@ instance (Column a, Column b, Column c, Column d) => Params (a, b, c, d) where
 
 
 instance (Column a, Column b, Column c, Column d, Column e) => Params (a, b, c, d, e) where
-    paramTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e]
     params =
         ((\(x, _, _, _, _) -> x) >$< E.param encodeColumn)
             <> ((\(_, x, _, _, _) -> x) >$< E.param encodeColumn)
@@ -224,7 +262,6 @@ instance (Column a, Column b, Column c, Column d, Column e) => Params (a, b, c, 
 
 
 instance (Column a, Column b, Column c, Column d, Column e, Column f) => Params (a, b, c, d, e, f) where
-    paramTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e, columnType @f]
     params =
         ((\(x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
             <> ((\(_, x, _, _, _, _) -> x) >$< E.param encodeColumn)
@@ -235,7 +272,6 @@ instance (Column a, Column b, Column c, Column d, Column e, Column f) => Params 
 
 
 instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g) => Params (a, b, c, d, e, f, g) where
-    paramTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e, columnType @f, columnType @g]
     params =
         ((\(x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
             <> ((\(_, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
@@ -247,7 +283,6 @@ instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g) 
 
 
 instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h) => Params (a, b, c, d, e, f, g, h) where
-    paramTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e, columnType @f, columnType @g, columnType @h]
     params =
         ((\(x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
             <> ((\(_, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
@@ -259,50 +294,96 @@ instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, 
             <> ((\(_, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
 
 
+-- | The Postgres types of a statement's parameters.
+type family PgParamTypes (p :: Type) :: [Symbol] where
+    PgParamTypes () = '[]
+    PgParamTypes (a, b) = '[PgColumnType a, PgColumnType b]
+    PgParamTypes (a, b, c) = '[PgColumnType a, PgColumnType b, PgColumnType c]
+    PgParamTypes (a, b, c, d) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d]
+    PgParamTypes (a, b, c, d, e) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e]
+    PgParamTypes (a, b, c, d, e, f) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f]
+    PgParamTypes (a, b, c, d, e, f, g) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g]
+    PgParamTypes (a, b, c, d, e, f, g, h) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h]
+    PgParamTypes a = '[PgColumnType a]
+
+
 -- | A result row: one column, or a tuple of them.
 class Row a where
-    columnTypes :: [Text]
     row :: D.Row a
 
 
 instance {-# OVERLAPPABLE #-} Column a => Row a where
-    columnTypes = [columnType @a]
     row = D.column decodeColumn
 
 
 instance (Column a, Column b) => Row (a, b) where
-    columnTypes = [columnType @a, columnType @b]
     row = (,) <$> D.column decodeColumn <*> D.column decodeColumn
 
 
 instance (Column a, Column b, Column c) => Row (a, b, c) where
-    columnTypes = [columnType @a, columnType @b, columnType @c]
     row = (,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
 
 
 instance (Column a, Column b, Column c, Column d) => Row (a, b, c, d) where
-    columnTypes = [columnType @a, columnType @b, columnType @c, columnType @d]
     row = (,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
 
 
 instance (Column a, Column b, Column c, Column d, Column e) => Row (a, b, c, d, e) where
-    columnTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e]
     row = (,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
 
 
 instance (Column a, Column b, Column c, Column d, Column e, Column f) => Row (a, b, c, d, e, f) where
-    columnTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e, columnType @f]
     row = (,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
 
 
 instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g) => Row (a, b, c, d, e, f, g) where
-    columnTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e, columnType @f, columnType @g]
     row = (,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
 
 
 instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h) => Row (a, b, c, d, e, f, g, h) where
-    columnTypes = [columnType @a, columnType @b, columnType @c, columnType @d, columnType @e, columnType @f, columnType @g, columnType @h]
     row = (,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+-- | The Postgres types of a statement's result columns.
+type family PgColumnTypes (r :: Type) :: [Symbol] where
+    PgColumnTypes (a, b) = '[PgColumnType a, PgColumnType b]
+    PgColumnTypes (a, b, c) = '[PgColumnType a, PgColumnType b, PgColumnType c]
+    PgColumnTypes (a, b, c, d) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d]
+    PgColumnTypes (a, b, c, d, e) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e]
+    PgColumnTypes (a, b, c, d, e, f) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f]
+    PgColumnTypes (a, b, c, d, e, f, g) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g]
+    PgColumnTypes (a, b, c, d, e, f, g, h) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h]
+    PgColumnTypes a = '[PgColumnType a]
+
+
+-- | Type-level names, as text.
+class KnownSymbols (ss :: [Symbol]) where
+    symbolTexts :: [Text]
+
+
+instance KnownSymbols '[] where
+    symbolTexts = []
+
+
+instance (KnownSymbol s, KnownSymbols ss) => KnownSymbols (s ': ss) where
+    symbolTexts = Text.pack (symbolVal (Proxy @s)) : symbolTexts @ss
+
+
+-- | The Postgres types of a statement's parameters, as GHC worked them out
+-- where it is used. A class of its own, rather than 'KnownSymbols' itself,
+-- so that @hasql-check-hie@ finds the whole list in a @.hie@ file, and not
+-- only the tails 'KnownSymbols' is built from.
+class KnownSymbols ps => PostgresParams ps
+
+
+instance KnownSymbols ps => PostgresParams ps
+
+
+-- | The Postgres types of a statement's result columns; see 'PostgresParams'.
+class KnownSymbols cs => PostgresColumns cs
+
+
+instance KnownSymbols cs => PostgresColumns cs
 
 
 -- | A statement's text, as the quoter cut it: SQL, and the places its
@@ -331,38 +412,16 @@ render paramTypes' columnTypes' = foldMap \case
 
 
 -- | A statement returning rows, given what to make of them.
-statement :: forall p r a. (Params p, Row r) => [Piece] -> (D.Row r -> D.Result a) -> Statement p a
+statement ::
+    forall p r a ps cs.
+    (Params p, Row r, ps ~ PgParamTypes p, cs ~ PgColumnTypes r, PostgresParams ps, PostgresColumns cs) =>
+    [Piece] ->
+    (D.Row r -> D.Result a) ->
+    Statement p a
 statement pieces result =
-    Statement.preparable (render (paramTypes @p) (columnTypes @r) pieces) params (result row)
+    Statement.preparable (render (symbolTexts @ps) (symbolTexts @cs) pieces) params (result row)
 
 
 -- | A statement returning no rows.
-resultless :: forall p. Params p => [Piece] -> Statement p ()
-resultless pieces = Statement.preparable (render (paramTypes @p) [] pieces) params D.noResult
-
-
--- | Each Haskell type the checker knows the Postgres type of, by its
--- qualified name.
-known :: [(Text, Text)]
-known =
-    [ entry @Bool
-    , entry @Int16
-    , entry @Int32
-    , entry @Int64
-    , entry @Float
-    , entry @Double
-    , entry @Scientific
-    , entry @Text
-    , entry @ByteString
-    , entry @UUID
-    , entry @Day
-    , entry @LocalTime
-    , entry @UTCTime
-    , entry @TimeOfDay
-    , entry @Aeson.Value
-    ]
-  where
-    entry :: forall a. (Typeable a, Value a) => (Text, Text)
-    entry =
-        let tc = typeRepTyCon (typeRep (Proxy @a))
-         in (Text.pack (tyConModule tc <> "." <> tyConName tc), typeName @a)
+resultless :: forall p ps. (Params p, ps ~ PgParamTypes p, PostgresParams ps) => [Piece] -> Statement p ()
+resultless pieces = Statement.preparable (render (symbolTexts @ps) [] pieces) params D.noResult
