@@ -1,5 +1,5 @@
 -- |
--- Module      : Source
+-- Module      : Hasql.Check.Ghc.Source
 -- Copyright   : (c) 2026 Kronor.io
 --
 -- License     : BSD-3-Clause
@@ -7,11 +7,21 @@
 -- Stability   : experimental
 -- Portability : GHC
 --
--- Find a quote in its source, from the span GHC gives its generated code.
+-- A statement of "Hasql.Check.Inferred.TH", from what GHC knows of it: its
+-- quote, found in its source from the span GHC gives the code it generated,
+-- and its types, from the dictionaries that code is passed. Whether GHC's
+-- types come from a @.hie@ file or a compiler plugin, they are read here.
 --
 -- GHC counts columns from 1, and a tab as reaching the next tab stop, every 8
 -- columns; the source text counts characters.
-module Source (
+module Hasql.Check.Ghc.Source (
+    -- * Statements
+    Statement (..),
+    Column (..),
+    statementAt,
+    typeName,
+
+    -- * Quotes
     Quote (..),
     quoteAt,
     Types (..),
@@ -19,6 +29,8 @@ module Source (
     Ty (..),
     ground,
     columnTypes,
+    symbols,
+    labelLists,
     charIndex,
     ghcColumn,
 ) where
@@ -161,3 +173,86 @@ isTuple :: String -> Bool
 isTuple name = case splitAt 5 name of
     ("Tuple", n) -> not (null n) && all isDigit n
     _ -> False
+
+
+-- * Statements
+
+
+-- | A statement, with what the checker needs of it.
+data Statement = Statement
+    { line :: Int
+    , quote :: Quote
+    , params :: [Column]
+    , row :: Maybe [Column]
+    -- ^ Nothing for a statement that returns no rows.
+    }
+
+
+-- | A parameter or result column.
+data Column = Column
+    { haskellType :: String
+    , postgres :: String
+    , labels :: [String]
+    -- ^ The enum's labels, if it is one.
+    , nullable :: Bool
+    }
+
+
+-- | The statement whose generated code has the given span, given the source
+-- lines and the types of the dictionaries the code is passed there: nothing
+-- if the span is not a quote of these quoters, an error if its types are not
+-- concrete there.
+statementAt :: [String] -> (Int, Int) -> (Int, Int) -> [Ty] -> Maybe (Either String Statement)
+statementAt source start@(line', _) end here = do
+    q <- quoteAt source start end
+    case typesOf ground params' rows of
+        NotInferred -> Nothing
+        Resolved p r
+            | Just names <- first paramNames
+            , Just labels' <- first paramLabels
+            , Just row' <- traverse (\r' -> (r',,) <$> first columnNames <*> first columnLabels) r ->
+                Just (Right (Statement line' q (columns True (p, names, labels')) (columns False <$> row')))
+        _ ->
+            Just
+                ( Left
+                    "the statement's types are not known where it is written, so it cannot be checked; give its binding a concrete type, such as Statement Int64 Text"
+                )
+  where
+    params' = [p | Con "Hasql.Check.Inferred" "Params" [p] <- here]
+    rows = [r | Con "Hasql.Check.Inferred" "Row" [r] <- here]
+    paramNames = [ns | Con "Hasql.Check.Inferred" "PostgresParams" [l] <- here, Just ns <- [symbols l]]
+    columnNames = [ns | Con "Hasql.Check.Inferred" "PostgresColumns" [l] <- here, Just ns <- [symbols l]]
+    paramLabels = [ls | Con "Hasql.Check.Inferred" "PostgresParamLabels" [l] <- here, Just ls <- [labelLists l]]
+    columnLabels = [ls | Con "Hasql.Check.Inferred" "PostgresColumnLabels" [l] <- here, Just ls <- [labelLists l]]
+    first = \case
+        x : _ -> Just x
+        [] -> Nothing
+    columns isParams (t, names, labels') =
+        zipWith3 (\(c, nullable') postgres' ls -> Column (typeName c) postgres' ls nullable') (columnTypes isParams t) names labels'
+
+
+-- | A type as Haskell would write it, qualified.
+typeName :: Ty -> String
+typeName = \case
+    Con m n args -> unwords ((if null m then n else m <> "." <> n) : map (parenthesised . typeName) args)
+    Lit s -> show s
+    OtherLit s -> s
+    Var -> "?"
+  where
+    parenthesised name = if ' ' `elem` name then concat ["(", name, ")"] else name
+
+
+-- | A type-level list of strings.
+symbols :: Ty -> Maybe [String]
+symbols = \case
+    Con _ ":" [Lit s, rest] -> (s :) <$> symbols rest
+    Con _ "[]" [] -> Just []
+    _ -> Nothing
+
+
+-- | A type-level list of lists of strings.
+labelLists :: Ty -> Maybe [[String]]
+labelLists = \case
+    Con _ ":" [l, rest] -> (:) <$> symbols l <*> labelLists rest
+    Con _ "[]" [] -> Just []
+    _ -> Nothing

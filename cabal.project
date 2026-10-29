@@ -1,2 +1,6 @@
-packages: . hie
+packages: . ghc
+
+-- hasql-check-ghc's plugin tests compile fixtures with GHC itself, which
+-- finds the plugin through this.
+write-ghc-environment-files: always
 tests: True

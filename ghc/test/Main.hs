@@ -1,7 +1,7 @@
 module Main where
 
 import Control.Monad (unless)
-import Source
+import Hasql.Check.Ghc.Source
 import System.Exit (exitFailure)
 
 

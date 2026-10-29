@@ -21,6 +21,7 @@ module Hasql.Check.Inferred.Quote (
     sent,
     columns,
     checkSent,
+    checkInferred,
 ) where
 
 import Data.Aeson ((.!=), (.:), (.:?))
@@ -32,11 +33,14 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word32)
-import Hasql.Check (parsePlainStmt, quoterSettings)
+import Hasql.Check (parsePlainStmt, quoterSettings, renderStmt)
 import Hasql.Check.Annotate (annotate, typename, untypedLiterals)
+import Hasql.Check.Finding (Finding (..), statementHash)
 import Hasql.Check.Inferred (Piece (..), Template (..), render)
 import Hasql.Check.Inferred.TH (template)
-import Hasql.Check.Nullability (query)
+import Hasql.Check.Nullability (Catalogue, query)
+import Hasql.Check.Nullability qualified as Nullability
+import Hasql.Check.Types qualified as Types
 import PostgresqlSyntax qualified as Ast
 import Pqi qualified
 import Text.Read (readMaybe)
@@ -81,6 +85,43 @@ instance Aeson.FromJSON Inferred where
 
 instance Aeson.FromJSON Column where
     parseJSON = Aeson.withObject "column" \o -> Column <$> o .: "type" <*> o .: "postgres" <*> (o .:? "labels" .!= []) <*> o .: "nullable"
+
+
+-- | Everything checking an inferred statement finds: why it fails, or the
+-- warnings asked for - nullability, narrowing - in terms of its Haskell
+-- types, and its fingerprint for baselines: the SQL it sends, so that
+-- reading a column as another type is another statement.
+checkInferred :: Pqi.Connection -> Maybe Catalogue -> Bool -> Bool -> Inferred -> IO (Either String ([Finding], Text))
+checkInferred conn catalogue nullable narrowing q =
+    checkSent conn q >>= \case
+        errors@(_ : _) -> pure (Left (unlines errors))
+        [] -> case annotated q >>= parsePlainStmt True of
+            Left err -> pure (Left err)
+            Right ast -> do
+                let readAs = columns q
+                found <- case catalogue of
+                    Nothing -> pure []
+                    Just cat -> do
+                        nullables <- if nullable then maybe (pure []) (\cs -> Nullability.checkColumns conn cat (map snd cs) ast) readAs else pure []
+                        narrowed <-
+                            if narrowing
+                                then (<>) <$> Types.check conn cat ast <*> maybe (pure []) (\cs -> Types.checkColumns conn cat (map fst cs) ast) readAs
+                                else pure []
+                        pure (nullables <> narrowed)
+                let fingerprint = either (const (statementHash (renderStmt ast))) (statementHash . Text.encodeUtf8) (sent q)
+                pure (Right ([f{message = inHaskellTerms f.message} | f <- found], fingerprint))
+
+
+-- | A finding about an inferred quote, in terms of its Haskell types rather
+-- than the annotations they stand for.
+inHaskellTerms :: String -> String
+inHaskellTerms m =
+    Text.unpack
+        . Text.replace "is annotated " (if "parameter " `Text.isPrefixOf` t then "is sent as " else "is read as ")
+        . Text.replace "is annotated non-null" "is not a Maybe in Haskell"
+        $ t
+  where
+    t = Text.pack m
 
 
 -- | Quotes, one JSON object a line.

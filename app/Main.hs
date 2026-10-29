@@ -18,8 +18,7 @@ import Data.Text qualified
 import Data.Text.Encoding qualified
 import Hasql.Check
 import Hasql.Check.Finding
-import Hasql.Check.Inferred.Quote (Inferred (..), annotated, checkSent, readInferred)
-import Hasql.Check.Inferred.Quote qualified as Inferred
+import Hasql.Check.Inferred.Quote (Inferred (..), annotated, checkInferred, readInferred)
 import Hasql.Check.Lexer
 import Hasql.Check.Nullability qualified as Nullability
 import Hasql.Check.Parser
@@ -251,18 +250,6 @@ collectInferred paths =
                     ]
 
 
--- | A finding about an inferred quote, in terms of its Haskell types rather
--- than the annotations they stand for.
-inHaskellTerms :: String -> String
-inHaskellTerms m =
-    Data.Text.unpack
-        . Data.Text.replace "is annotated " (if "parameter " `Data.Text.isPrefixOf` t then "is sent as " else "is read as ")
-        . Data.Text.replace "is annotated non-null" "is not a Maybe in Haskell"
-        $ t
-  where
-    t = Data.Text.pack m
-
-
 -- | Whether a quote found in a source file is one --inferred has: its
 -- quoter has the same names as hasql-th's. The paths may be relative to
 -- different directories, so one need only end with the other; and the quote
@@ -319,46 +306,35 @@ main = do
                         exists <- doesFileExist file
                         fileLines <- if exists then Data.Text.lines . Data.Text.Encoding.decodeUtf8Lenient <$> Data.ByteString.readFile file else pure []
                         forM qqs \(qq@(QuasiQuote (AlexPn _ line _, quoter) (_, stmt)), inferredQuote) -> do
-                            -- An inferred quote is checked as it is sent;
-                            -- the annotated statement it stands for is for
-                            -- the warnings.
-                            errPrepare <- case inferredQuote of
-                                Just q -> (\errs -> if null errs then Right () else Left (unlines errs)) <$> checkSent libPqConn q
-                                Nothing -> Hasql.Check.prepare libPqConn "" stmt
-                            case errPrepare of
-                                Left err -> do
+                            let checkedRules =
+                                    [Nullable | opts.nullability && isQuoterIn Nullability.resultQuoters quoter]
+                                        <> [Narrowing | opts.types]
+                                report h found = do
+                                    let (kept, messages) = settle checkedRules (directivesAbove fileLines line) baseline h found
+                                    when (not (null messages)) do
+                                        putStrLn ("Warning in " <> location file qq)
+                                        forM_ messages \m -> putStrLn ("  " <> m)
+                                    pure (Right (length messages, [BaselineEntry h f.rule f.subject (Data.Text.pack (location file qq)) | f <- kept]))
+                                failed err = do
                                     putStrLn ("Error in " <> location file qq)
                                     putStrLn err
                                     pure (Left (DbError qq err))
-                                Right _ -> case (catalogue, maybe parseStmt (const (parsePlainStmt True)) inferredQuote stmt) of
-                                    (Just cat, Right ast) -> do
-                                        let checkedRules =
-                                                [Nullable | opts.nullability && isQuoterIn Nullability.resultQuoters quoter]
-                                                    <> [Narrowing | opts.types]
-                                        -- An inferred quote's result columns are cast
-                                        -- around it, not annotated: their types and
-                                        -- nullability come from the Haskell types.
-                                        let inferredColumns = Inferred.columns =<< inferredQuote
-                                            checkNullable = case inferredQuote of
-                                                Just _ -> maybe (pure []) (\cs -> Nullability.checkColumns libPqConn cat (map snd cs) ast) inferredColumns
-                                                Nothing -> Nullability.check libPqConn cat ast
-                                            checkTypes = case inferredQuote of
-                                                Just _ -> (<>) <$> Types.check libPqConn cat ast <*> maybe (pure []) (\cs -> Types.checkColumns libPqConn cat (map fst cs) ast) inferredColumns
-                                                Nothing -> Types.check libPqConn cat ast
-                                        nullable <- if Nullable `elem` checkedRules then checkNullable else pure []
-                                        narrowing <- if opts.types then checkTypes else pure []
-                                        -- An inferred statement by what it sends,
-                                        -- its result types too: reading a column
-                                        -- as another type is another statement.
-                                        let h = case Inferred.sent <$> inferredQuote of
-                                                Just (Right sql) -> statementHash (Data.Text.Encoding.encodeUtf8 sql)
-                                                _ -> statementHash (renderStmt ast)
-                                            (kept, messages) = settle checkedRules (directivesAbove fileLines line) baseline h (nullable <> narrowing)
-                                        when (not (null messages)) do
-                                            putStrLn ("Warning in " <> location file qq)
-                                            forM_ messages \m -> putStrLn ("  " <> maybe id (const inHaskellTerms) inferredQuote m)
-                                        pure (Right (length messages, [BaselineEntry h f.rule f.subject (Data.Text.pack (location file qq)) | f <- kept]))
-                                    _ -> pure (Right (0, []))
+                            case inferredQuote of
+                                -- Checked as it is sent; its warnings in terms of
+                                -- its Haskell types.
+                                Just q ->
+                                    checkInferred libPqConn catalogue (Nullable `elem` checkedRules) (Narrowing `elem` checkedRules) q >>= \case
+                                        Left err -> failed err
+                                        Right (found, h) -> report h found
+                                Nothing ->
+                                    Hasql.Check.prepare libPqConn "" stmt >>= \case
+                                        Left err -> failed err
+                                        Right _ -> case (catalogue, parseStmt stmt) of
+                                            (Just cat, Right ast) -> do
+                                                nullable <- if Nullable `elem` checkedRules then Nullability.check libPqConn cat ast else pure []
+                                                narrowing <- if opts.types then Types.check libPqConn cat ast else pure []
+                                                report (statementHash (renderStmt ast)) (nullable <> narrowing)
+                                            _ -> pure (Right (0, []))
             let (warningCounts, entries) = unzip (rights results)
             forM_ opts.writeBaseline \path ->
                 Data.ByteString.writeFile path (Data.Text.Encoding.encodeUtf8 (renderBaseline (concat entries)))

@@ -41,6 +41,7 @@ library
   exposed-modules:
     Hasql.Check
     Hasql.Check.Annotate
+    Hasql.Check.Compile
     Hasql.Check.Finding
     Hasql.Check.Inferred
     Hasql.Check.Inferred.Quote

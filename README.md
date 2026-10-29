@@ -461,12 +461,40 @@ Error in src/Shop/Enums.hs:20:11
 column 1 (state) is read as Shop.Enums.PaymentState, which cannot read labels payment_state has: REFUNDED
 ```
 
-### Checking them
+### Checking them while you compile
 
 The types are only known once GHC has type-checked the module, after the
-quoter ran, so these statements are not checked while they compile. Instead,
-have GHC write `.hie` files, and read the types from them with
-`hasql-check-hie`:
+quoter ran. A GHC plugin, `Hasql.Check.Plugin` from the `hasql-check-ghc`
+package, checks each statement then, as `Hasql.Check.TH` does for hasql-th's
+quoters. Add it to the package:
+
+```
+build-depends: hasql-check-ghc
+ghc-options:   -fplugin=Hasql.Check.Plugin
+```
+
+and set `HASQL_CHECK_DATABASE_URL`, and the same environment variables as
+for [`Hasql.Check.TH`](#environment-variables-for-hasqlcheckth-and-the-plugin). A statement
+that does not fit the schema is a compile error at its quote, in GHC's output
+and in your editor:
+
+```
+src/Shop/Newtypes.hs:35:34: error:
+    hasql-check: the statement does not fit HASQL_CHECK_DATABASE_URL's schema:
+      column 1 (nickname) is text, but is read as Shop.Newtypes.Nickname (bigint), which Postgres converts it to only when told to, and can fail to at runtime
+   |
+35 | nicknameOf = [singletonStatement| select nickname from customer where id = $1 |]
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+Without the variable it checks nothing, and if the database cannot be reached
+it says so once and lets the build carry on.
+
+### Checking them in CI
+
+In CI, as for annotated statements, check everything with the command
+instead. Have GHC write `.hie` files, and read the types from them with
+`hasql-check-hie`, also from `hasql-check-ghc`:
 
 ```
 $ cabal build --ghc-options='-fwrite-ide-info -hiedir=.hie'
@@ -532,14 +560,16 @@ column 1 (nickname) is text, but is read as Shop.Newtypes.Nickname (bigint), whi
 A column whose type Postgres converts on its own, `varchar` to `text` or
 `int4` to `int8`, is fine, and one that narrows is a `--types` warning.
 
-A statement whose types are only known where it is used, such as a binding of
-type `(Params p, Row r) => Statement p r`, cannot be checked:
-`hasql-check-hie` fails, naming it. Give it a concrete type.
+A statement must have concrete types where it is written: a binding of type
+`(Params p, Row r) => Statement p r` does not compile, since its Postgres
+types cannot be known there. Give it a concrete type.
 
 `hasql-check-hie` needs no database, so it can run inside a sandboxed build,
-such as a Nix derivation, with only the `--inferred` step outside it. The
-`.hie` format changes with each GHC release, so build `hasql-check-hie` with
-the GHC your project uses.
+such as a Nix derivation, with only the `--inferred` step outside it.
+
+The plugin and `hasql-check-hie` use GHC's own library, and GHC's
+internals change with each release: build `hasql-check-ghc` with the GHC
+your project uses.
 
 ## Reference
 
@@ -566,7 +596,7 @@ or not. It skips quotes inside comments and string literals, and
 Exit codes: 0 when everything prepares (and, with `--fail-on-warnings`,
 nothing is warned about), 1 otherwise, 2 for bad arguments.
 
-### Environment variables for `Hasql.Check.TH`
+### Environment variables for `Hasql.Check.TH` and the plugin
 
 | Variable | |
 |---|---|
@@ -599,7 +629,9 @@ The warnings go to stderr in GHC's format, rather than through GHC, so
 ## Development
 
 `cabal test` starts a throwaway PostgreSQL server, so `initdb`, `pg_ctl` and
-`psql` must be on `PATH`.
+`psql` must be on `PATH`. The plugin's tests compile fixtures with GHC
+itself, which finds the plugin through the package environment cabal writes
+(`write-ghc-environment-files: always`, in `cabal.project`).
 
 The nullability check follows [sqlx](https://github.com/launchbadge/sqlx)'s:
 the statement is prepared again without its annotations so that Postgres

@@ -27,7 +27,6 @@ import Control.Monad (unless)
 import Data.Char (ord)
 import Data.List (intercalate)
 import Data.Map qualified as Map
-import Data.Maybe (listToMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import GHC.Data.FastString (getLexicalFastString, unpackFS)
@@ -40,7 +39,7 @@ import GHC.Types.Name.Cache (initNameCache)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (srcSpanEndCol, srcSpanEndLine, srcSpanStartCol, srcSpanStartLine)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import Source (Quote (..), Ty (..), Types (..), columnTypes, ground, quoteAt, typesOf)
+import Hasql.Check.Ghc.Source (Column (..), Quote (..), Statement (..), Ty (..), statementAt)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
@@ -64,33 +63,14 @@ main = do
         concat
             <$> mapM
                 ( \(s, here) ->
-                    let params = [p | Con "Hasql.Check.Inferred" "Params" [p] <- here]
-                        rows = [r | Con "Hasql.Check.Inferred" "Row" [r] <- here]
-                        paramNames = [ns | Con "Hasql.Check.Inferred" "PostgresParams" [l] <- here, Just ns <- [symbols l]]
-                        columnNames = [ns | Con "Hasql.Check.Inferred" "PostgresColumns" [l] <- here, Just ns <- [symbols l]]
-                        paramLabels = [ls | Con "Hasql.Check.Inferred" "PostgresParamLabels" [l] <- here, Just ls <- [labelLists l]]
-                        columnLabels = [ls | Con "Hasql.Check.Inferred" "PostgresColumnLabels" [l] <- here, Just ls <- [labelLists l]]
-                        -- The enclosing declarations hold the same
-                        -- dictionaries, but only the quote's own span starts
-                        -- after "[quoter|".
-                        at = quoteAt source (srcSpanStartLine s, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s)
-                        location q = hie_hs_file hf <> ":" <> show (srcSpanStartLine s) <> ":" <> show q.column
-                     in case (at, typesOf ground params rows) of
-                            (Just _, NotInferred) -> pure []
-                            (Just q, Resolved p r)
-                                | Just names <- listToMaybe paramNames
-                                , Just labels <- listToMaybe paramLabels
-                                , Just row <- traverse (\r' -> (r',,) <$> listToMaybe columnNames <*> listToMaybe columnLabels) r ->
-                                    [] <$ putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q (p, names, labels) row)
-                            (Just q, _) -> pure [unresolved (location q)]
-                            (Nothing, _) -> pure []
+                    -- The enclosing declarations hold the same dictionaries,
+                    -- but only the quote's own span starts after "[quoter|".
+                    case statementAt source (srcSpanStartLine s, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s) here of
+                        Nothing -> pure []
+                        Just (Right statement) -> [] <$ putStrLn (output (hie_hs_file hf) statement)
+                        Just (Left err) -> pure [hie_hs_file hf <> ":" <> show (srcSpanStartLine s) <> ":" <> show (srcSpanStartCol s) <> ": " <> err]
                 )
                 (Map.toList found)
-
-    unresolved location =
-        location
-            <> ": the statement's types are not known where it is written, so it cannot be checked;"
-            <> " give its binding a concrete type, such as Statement Int64 Text"
 
     collect toTy node =
         -- The dictionaries the generated code passes are identifiers of the
@@ -102,55 +82,27 @@ main = do
          in here <> concatMap (collect toTy) (nodeChildren node)
 
 
--- | One quote's line of output.
-output :: FilePath -> Int -> Quote -> (Ty, [String], [[String]]) -> Maybe (Ty, [String], [[String]]) -> String
-output file line q params row =
+-- | One statement's line of output.
+output :: FilePath -> Statement -> String
+output file statement =
     object
         [ ("file", string file)
-        , ("line", show line)
-        , ("column", show q.column)
-        , ("quoter", string q.quoter)
-        , ("sql", string q.body)
-        , ("params", columns True params)
-        , ("row", maybe "null" (columns False) row)
+        , ("line", show statement.line)
+        , ("column", show statement.quote.column)
+        , ("quoter", string statement.quote.quoter)
+        , ("sql", string statement.quote.body)
+        , ("params", columns statement.params)
+        , ("row", maybe "null" columns statement.row)
         ]
-
-
--- | A parameter or row type, as the list of its columns, with the Postgres
--- type of each, and the labels of each that is an enum.
-columns :: Bool -> (Ty, [String], [[String]]) -> String
-columns isParams (t, names, labels) = list (zipWith3 (\(c, nullable) postgres ls -> one c postgres ls nullable) (columnTypes isParams t) names labels)
   where
-    one c postgres ls nullable =
+    columns cs = "[" <> intercalate "," (map column cs) <> "]"
+    column c =
         object
-            [ ("type", string (qualified c))
-            , ("postgres", string postgres)
-            , ("labels", list (map string ls))
-            , ("nullable", if nullable then "true" else "false")
+            [ ("type", string c.haskellType)
+            , ("postgres", string c.postgres)
+            , ("labels", "[" <> intercalate "," (map string c.labels) <> "]")
+            , ("nullable", if c.nullable then "true" else "false")
             ]
-    qualified = \case
-        Con m n args -> unwords ((if null m then n else m <> "." <> n) : map (parenthesised . qualified) args)
-        Lit s -> show s
-        OtherLit s -> s
-        Var -> "?"
-    list xs = "[" <> intercalate "," xs <> "]"
-    parenthesised name = if ' ' `elem` name then "(" <> name <> ")" else name
-
-
--- | A type-level list of lists of strings.
-labelLists :: Ty -> Maybe [[String]]
-labelLists = \case
-    Con _ ":" [l, rest] -> (:) <$> symbols l <*> labelLists rest
-    Con _ "[]" [] -> Just []
-    _ -> Nothing
-
-
--- | A type-level list of strings.
-symbols :: Ty -> Maybe [String]
-symbols = \case
-    Con _ ":" [Lit s, rest] -> (s :) <$> symbols rest
-    Con _ "[]" [] -> Just []
-    _ -> Nothing
 
 
 convert :: HieTypeFix -> Ty
