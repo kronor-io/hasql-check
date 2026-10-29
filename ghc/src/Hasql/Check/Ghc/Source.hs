@@ -19,6 +19,7 @@ module Hasql.Check.Ghc.Source (
     Statement (..),
     Column (..),
     statementAt,
+    statementOf,
     typeName,
 
     -- * Quotes
@@ -205,6 +206,14 @@ data Column = Column
 statementAt :: [String] -> (Int, Int) -> (Int, Int) -> [Ty] -> Maybe (Either String Statement)
 statementAt source start@(line', _) end here = do
     q <- quoteAt source start end
+    statementOf line' q here
+
+
+-- | The statement of a quote on a line, given the types of the dictionaries
+-- its generated code is passed: nothing if it is not a quote of these
+-- quoters, an error if its types are not concrete there.
+statementOf :: Int -> Quote -> [Ty] -> Maybe (Either String Statement)
+statementOf line' q here =
     case typesOf ground params' rows of
         NotInferred -> Nothing
         Resolved p r

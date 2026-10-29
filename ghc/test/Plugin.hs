@@ -34,6 +34,8 @@ main = do
 
 data Case = Case
     { caseName :: String
+    , before :: [Database]
+    -- ^ Compilations of the same module, in the same directory, first.
     , database :: Database
     , extraEnv :: [(String, String)]
     , source :: String
@@ -48,18 +50,21 @@ cases :: [Case]
 cases =
     [ Case
         "checks nothing when no database is set"
+        []
         NoDatabase
         []
         (fixture "Statement Int64 Text" "select nope from customer where id = $1")
         \(code, out) -> code == ExitSuccess && not ("hasql-check:" `isInfixOf` out)
     , Case
         "accepts a statement that fits the schema"
+        []
         TestDatabase
         []
         (fixture "Statement Int64 (Maybe Text)" "select nickname from customer where id = $1")
         \(code, _) -> code == ExitSuccess
     , Case
         "fails at the quote on a statement that does not prepare"
+        []
         TestDatabase
         []
         (fixture "Statement Int64 Text" "select nope from customer where id = $1")
@@ -69,12 +74,14 @@ cases =
                 && "column \"nope\" does not exist" `isInfixOf` out
     , Case
         "fails on a column read through a conversion that can fail"
+        []
         TestDatabase
         []
         (fixture "Statement Int64 Int64" "select email from customer where id = $1")
         \(code, out) -> code /= ExitSuccess && "column 1 (email) is text, but is read as" `isInfixOf` out
     , Case
         "fails on an enum read without a label the database has"
+        []
         TestDatabase
         []
         ( unlines
@@ -95,6 +102,7 @@ cases =
         \(code, out) -> code /= ExitSuccess && "which cannot read labels payment_state has: REFUNDED" `isInfixOf` out
     , Case
         "warns about a nullable column read without a Maybe, without failing"
+        []
         TestDatabase
         [("HASQL_CHECK_NULLABILITY", "1")]
         (fixture "Statement Int64 Text" "select nickname from customer where id = $1")
@@ -103,7 +111,33 @@ cases =
                 && "Fixture.hs:11:" `isInfixOf` out
                 && "warning: hasql-check: column 1 (nickname) is not a Maybe in Haskell" `isInfixOf` out
     , Case
+        "checks the statement GHC compiled, after CPP, not the file"
+        []
+        TestDatabase
+        []
+        ( unlines
+            [ "{-# LANGUAGE CPP, QuasiQuotes #-}"
+            , "module Fixture where"
+            , "import Data.Int (Int64)"
+            , "import Data.Text (Text)"
+            , "import Hasql.Check.Inferred.TH"
+            , "import Hasql.Statement (Statement)"
+            , "#define FIELD nope"
+            , "s :: Statement Int64 Text"
+            , "s = [singletonStatement| select FIELD from customer where id = $1 |]"
+            ]
+        )
+        \(code, out) -> code /= ExitSuccess && "column \"nope\" does not exist" `isInfixOf` out
+    , Case
+        "checks a module compiled before without a database once one is set"
+        [NoDatabase]
+        TestDatabase
+        []
+        (fixture "Statement Int64 Text" "select nope from customer where id = $1")
+        \(code, out) -> code /= ExitSuccess && "column \"nope\" does not exist" `isInfixOf` out
+    , Case
         "does not fail the build when the database cannot be reached"
+        []
         Unreachable
         []
         (fixture "Statement Int64 Text" "select nope from customer where id = $1")
@@ -134,16 +168,19 @@ run compiler env conn c =
     withSystemTempDirectory "hasql-check-plugin" \dir -> do
         writeFile (dir </> "Fixture.hs") c.source
         inherited <- getEnvironment
-        let database = case c.database of
-                TestDatabase -> [("HASQL_CHECK_DATABASE_URL", conn)]
-                NoDatabase -> []
-                Unreachable -> [("HASQL_CHECK_DATABASE_URL", "host=/nonexistent")]
-            ours = database <> c.extraEnv
-            procEnv = ours <> filter (not . ("HASQL_CHECK_" `isPrefixOf`) . fst) inherited
-        (code, out, err) <-
-            readCreateProcessWithExitCode
-                (proc compiler ["-package-env", env, "-fno-code", "-fplugin=Hasql.Check.Plugin", "Fixture.hs"]){Process.cwd = Just dir, Process.env = Just procEnv}
-                ""
+        let compile db = do
+                let database = case db of
+                        TestDatabase -> [("HASQL_CHECK_DATABASE_URL", conn)]
+                        NoDatabase -> []
+                        Unreachable -> [("HASQL_CHECK_DATABASE_URL", "host=/nonexistent")]
+                    ours = database <> c.extraEnv
+                    procEnv = ours <> filter (not . ("HASQL_CHECK_" `isPrefixOf`) . fst) inherited
+                -- Interfaces written, so that a later compilation can reuse them.
+                readCreateProcessWithExitCode
+                    (proc compiler ["-package-env", env, "-fno-code", "-fwrite-interface", "-fplugin=Hasql.Check.Plugin", "Fixture.hs"]){Process.cwd = Just dir, Process.env = Just procEnv}
+                    ""
+        mapM_ compile c.before
+        (code, out, err) <- compile c.database
         let ok = c.expect (code, out <> err)
         unless ok (putStrLn (c.caseName <> ":\n" <> show code <> "\n" <> out <> err))
         pure ok

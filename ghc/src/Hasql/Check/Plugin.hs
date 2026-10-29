@@ -22,19 +22,17 @@
 -- no database set, it checks nothing.
 module Hasql.Check.Plugin (plugin) where
 
-import Control.Exception (SomeException, try)
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
-import Data.ByteString qualified as ByteString
 import Data.Data (Data, cast, gmapQ)
+import Data.Maybe (catMaybes)
 import Data.Text qualified as Text
-import Data.Text.Encoding qualified as Text
 import GHC.Core.TyCo.Rep (Type)
 import GHC.Core.TyCon (tyConName)
 import GHC.Core.Type (filterOutInvisibleTypes, isCharLitTy, isNumLitTy, isStrLitTy, splitTyConApp_maybe)
 import GHC.Core.Utils (exprType)
 import GHC.Data.FastString (unpackFS)
-import GHC.Driver.Plugins (Plugin (..), defaultPlugin, purePlugin)
+import GHC.Driver.Plugins (Plugin (..), PluginRecompile (..), defaultPlugin, keepRenamedSource)
 import GHC.Hs
 import GHC.Tc.Errors.Types (TcRnMessage (..))
 import GHC.Tc.Types (TcGblEnv (..), TcM)
@@ -45,16 +43,31 @@ import GHC.Types.Name (getOccString, nameModule_maybe)
 import GHC.Types.SrcLoc
 import GHC.Types.Var (varName)
 import GHC.Unit.Module (moduleName)
+import GHC.Utils.Fingerprint (fingerprintString)
 import GHC.Utils.Outputable (empty, nest, text, vcat)
 import Hasql.Check.Compile (Config (..), Session (..), readConfig, reportUnavailable, warning, warnings, withSession)
 import Hasql.Check.Finding (Rule (..))
-import Hasql.Check.Ghc.Source (Column (..), Quote (..), Statement (..), Ty (..), statementAt)
+import Hasql.Check.Ghc.Source (Column (..), Quote (..), Statement (..), Ty (..), statementOf)
 import Hasql.Check.Inferred.Quote (Inferred (Inferred), checkInferred)
 import Hasql.Check.Inferred.Quote qualified as Quote
 
 
 plugin :: Plugin
-plugin = defaultPlugin{typeCheckResultAction = \_ _ env -> env <$ check env, pluginRecompile = purePlugin}
+plugin =
+    defaultPlugin
+        { -- The quotes as GHC read them, after CPP and from an editor's buffer.
+          renamedResultAction = keepRenamedSource
+        , typeCheckResultAction = \_ _ env -> env <$ check env
+        , pluginRecompile = \_ -> recompile <$> readConfig
+        }
+
+
+-- | A module is checked again when what it was checked with changes, as a
+-- different database; a change of schema rechecks only the modules with
+-- statements, which depend on the schema file.
+recompile :: Config -> PluginRecompile
+recompile config =
+    MaybeRecompile (fingerprintString (show (config.databaseUrl, config.schemaFile, config.nullability, config.types, config.baseline)))
 
 
 check :: TcGblEnv -> TcM ()
@@ -62,21 +75,17 @@ check env = do
     config <- liftIO readConfig
     forM_ config.databaseUrl \url -> do
         -- A module with a statement depends on the schema, so that a change
-        -- of schema rechecks it, as for "Hasql.Check.TH"'s quoters.
+        -- of schema rechecks it, as for "Hasql.Check.TH"'s quoters, and on
+        -- the baseline its warnings are settled against.
         let found = statements (tcg_binds env)
-        unless (null found) (forM_ config.schemaFile \file -> updTcRef (tcg_dependent_files env) (file :))
-        sources <- liftIO (traverse (\(s, _) -> readSource (srcSpanFile s)) found)
-        forM_ (zip found sources) \((s, passed), source) ->
-            case statementAt source (srcSpanStartLine s, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s) (map fromType passed) of
-                Nothing -> pure ()
-                Just (Left err) -> failAt s err
-                Just (Right statement) -> checkStatement config url s statement
-  where
-    -- The source as GHC read it; a file that cannot be read has no quotes
-    -- to find.
-    readSource file =
-        either (const []) (lines . Text.unpack . Text.decodeUtf8Lenient)
-            <$> (try (ByteString.readFile (unpackFS file)) :: IO (Either SomeException ByteString.ByteString))
+            quotes = quasiQuotes (tcg_rn_decls env)
+        unless (null found) (forM_ (catMaybes [config.schemaFile, config.baseline]) \file -> updTcRef (tcg_dependent_files env) (file :))
+        forM_ found \(s, passed) ->
+            forM_ (quoteAround quotes s) \(line, q) ->
+                case statementOf line q (map fromType passed) of
+                    Nothing -> pure ()
+                    Just (Left err) -> failAt s err
+                    Just (Right statement) -> checkStatement config url s statement
 
 
 checkStatement :: Config -> String -> RealSrcSpan -> Statement -> TcM ()
@@ -120,6 +129,29 @@ failAt s message =
 
 
 -- * The statements in a type-checked module
+
+
+-- | The quasi-quotes of a renamed module, with their spans and the line each
+-- starts on.
+quasiQuotes :: Data a => a -> [(RealSrcSpan, Quote)]
+quasiQuotes x = here <> concat (gmapQ quasiQuotes x)
+  where
+    here = case cast x of
+        Just (L l (HsUntypedSplice _ (HsQuasiQuote _ quoter (L _ body))) :: LHsExpr GhcRn)
+            | RealSrcSpan s _ <- locA l ->
+                [(s, Quote (srcSpanStartCol s) (getOccString quoter) (unpackFS body))]
+        _ -> []
+
+
+-- | The innermost quote whose span holds the given span - that of the code it
+-- was spliced into - with the line it starts on.
+quoteAround :: [(RealSrcSpan, Quote)] -> RealSrcSpan -> Maybe (Int, Quote)
+quoteAround quotes s =
+    case [(srcSpanStartLine o, q) | (o, q) <- around, all (\(o', _) -> o' `containsSpan` o) around] of
+        found : _ -> Just found
+        [] -> Nothing
+  where
+    around = filter (\(o, _) -> o `containsSpan` s) quotes
 
 
 -- | Each use of 'Hasql.Check.Inferred.statement' or
