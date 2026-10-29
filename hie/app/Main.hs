@@ -40,14 +40,11 @@ import GHC.Types.Name.Cache (initNameCache)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (srcSpanEndCol, srcSpanEndLine, srcSpanStartCol, srcSpanStartLine)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import Source (Quote (..), Types (..), quoteAt, typesOf)
+import Source (Quote (..), Ty (..), Types (..), columnTypes, ground, quoteAt, typesOf)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 import Text.Printf (printf)
-
-
-data Ty = Con String String [Ty] | Lit String | Var
 
 
 main :: IO ()
@@ -122,15 +119,8 @@ output file line q params row =
 -- | A parameter or row type, as the list of its columns, with the Postgres
 -- type of each, and the labels of each that is an enum.
 columns :: Bool -> (Ty, [String], [[String]]) -> String
-columns isParams (t, names, labels) = list (zipWith3 column (split t) names labels)
+columns isParams (t, names, labels) = list (zipWith3 (\(c, nullable) postgres ls -> one c postgres ls nullable) (columnTypes isParams t) names labels)
   where
-    split = \case
-        Con _ "Unit" [] | isParams -> []
-        Con _ name args | take 5 name == "Tuple" -> args
-        other -> [other]
-    column c postgres ls = case c of
-        Con _ "Maybe" [inner] -> one inner postgres ls True
-        _ -> one c postgres ls False
     one c postgres ls nullable =
         object
             [ ("type", string (qualified c))
@@ -141,6 +131,7 @@ columns isParams (t, names, labels) = list (zipWith3 column (split t) names labe
     qualified = \case
         Con m n args -> unwords ((if null m then n else m <> "." <> n) : map (parenthesised . qualified) args)
         Lit s -> show s
+        OtherLit s -> s
         Var -> "?"
     list xs = "[" <> intercalate "," xs <> "]"
     parenthesised name = if ' ' `elem` name then "(" <> name <> ")" else name
@@ -169,17 +160,12 @@ convert (Roll t) = case t of
     HForAllTy _ b -> convert b
     HCastTy a -> convert a
     HLitTy (IfaceStrTyLit s) -> Lit (unpackFS (getLexicalFastString s))
+    HLitTy (IfaceNumTyLit n) -> OtherLit (show n)
+    HLitTy (IfaceCharTyLit c) -> OtherLit (show c)
     _ -> Var
   where
     names :: Name -> (String, String)
     names n = (maybe "" (moduleNameString . moduleName) (nameModule_maybe n), occNameString (nameOccName n))
-
-
-ground :: Ty -> Bool
-ground = \case
-    Var -> False
-    Lit _ -> True
-    Con _ _ args -> all ground args
 
 
 object :: [(String, String)] -> String

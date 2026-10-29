@@ -17,7 +17,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text.Encoding
 import Data.Vector qualified as Vector
 import GHC.Generics (Generic)
-import Hasql.Check.Inferred (Domain (..), PgEnum (..), Value, render)
+import Hasql.Check.Inferred (Domain (..), PgEnum (..), Value, qualifiedName, render)
 import Hasql.Check.Inferred.TH qualified as Inferred
 import Hasql.Check.Lexer (AlexPosn (..))
 import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
@@ -133,7 +133,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}'); create type payment_state as enum ('PENDING', 'PAID', 'REFUNDED'); create table payment (id int4 primary key, state payment_state not null); insert into payment values (1, 'PAID')"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create domain positive_cents as cents check (value > 0); create table wallet (balance positive_cents not null); create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}'); create type payment_state as enum ('PENDING', 'PAID', 'REFUNDED'); create table payment (id int4 primary key, state payment_state not null); insert into payment values (1, 'PAID'); create domain payment_status as payment_state; create table payment_log (id int4 primary key, status payment_status not null); insert into payment_log values (1, 'REFUNDED')"]
                 action conn
 
 
@@ -570,6 +570,12 @@ piecesSpec = do
         sent "delete from t where id = $1" ["int8"] []
             `shouldBe` Right "DELETE FROM t WHERE id = $1 :: int8"
 
+    it "takes an enum's name as SQL, as a cast does, for the codecs" $
+        map
+            qualifiedName
+            ["payment_state", "Public.Payment_State", "\"payment_state\"", "\"My Schema\".\"x.y\""]
+            `shouldBe` [(Nothing, "payment_state"), (Just "public", "payment_state"), (Nothing, "payment_state"), (Just "My Schema", "x.y")]
+
     it "rejects SQL it cannot parse" $
         Inferred.template "select from where" `shouldSatisfy` isLeft
 
@@ -577,6 +583,16 @@ piecesSpec = do
 data PaymentState = PENDING | PAID | REFUNDED
     deriving stock (Eq, Show, Generic)
     deriving (Value) via PgEnum "payment_state" PaymentState
+
+
+newtype Qualified = Qualified PaymentState
+    deriving stock (Eq, Show)
+    deriving (Value) via PgEnum "public.\"payment_state\"" PaymentState
+
+
+newtype Status = Status PaymentState
+    deriving stock (Eq, Show)
+    deriving (Value) via Domain "payment_status" PaymentState
 
 
 newtype Label = Label Text
@@ -656,6 +672,14 @@ runtimeSpec = do
     itWithOuter "reads an enum as a Haskell enumeration" \conn ->
         runStatement conn (1 :: Int32) [Inferred.singletonStatement|select state from payment where id = $1|]
             `shouldReturn` PAID
+
+    itWithOuter "reads an enum named with its schema and in quotes" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select state from payment where id = $1|]
+            `shouldReturn` Qualified PAID
+
+    itWithOuter "reads a domain over an enum" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select status from payment_log where id = $1|]
+            `shouldReturn` Status REFUNDED
 
     itWithOuter "sends a Haskell enumeration as an enum" \conn ->
         runStatement conn PENDING [Inferred.singletonStatement|select count(*) from payment where state = $1|]
@@ -831,6 +855,41 @@ inferredSpec = do
     itWithOuter "warns about a nullable array read without a Maybe" \conn -> do
         (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False []])]
         out `shouldSatisfy` ("column 1 (scores) is not a Maybe in Haskell, but public.tagged.scores is nullable" `isInfixOf`)
+    itWithOuter "accepts NULL and string literals, typed by the cast" \conn ->
+        runInferred
+            conn
+            []
+            [ inferredQuote "singletonStatement" "select NULL" [] (Just [Column "GHC.Internal.Int.Int64" "int8" True []])
+            , inferredQuote "singletonStatement" "select '2026-10-29'" [] (Just [Column "Data.Time.Calendar.Days.Day" "date" False []])
+            ]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects a string literal that is not of the type read" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 'abc'" [] (Just [Column "Data.UUID.Types.Internal.UUID" "uuid" False []])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("column 1 (?column?) is 'abc', which cannot be read as Data.UUID.Types.Internal.UUID" `isInfixOf`)
+
+    itWithOuter "accepts any column read as text, which Postgres converts to on assignment" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select id from account" [] (Just [text])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a domain over a domain, read as the type at the bottom" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select balance from wallet" [] (Just [Column "Shop.Positive" "positive_cents" False []])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a domain column behind a *" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select x.* from (select price from ledger) x" [] (Just [Column "Shop.Cents" "cents" True []])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects a Postgres type that does not exist, behind a * too" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select x.* from (select 'abc'::text) x" [] (Just [Column "Shop.Missing" "missing_domain" False []])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("no such Postgres type: missing_domain" `isInfixOf`)
+
+    itWithOuter "rejects a UNION whose branches do not agree, which fails as sent too" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select name from account union all select 1" [] (Just [int64])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("UNION types text and integer cannot be matched" `isInfixOf`)
 
     itWithOuter "accepts an enum read with all its labels" \conn ->
         runInferred conn [] [inferredQuote "singletonStatement" "select state from payment" [] (Just [Column "Shop.State" "payment_state" False ["PENDING", "PAID", "REFUNDED"]])]
@@ -845,6 +904,15 @@ inferredSpec = do
         runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID"]] Nothing]
             `shouldReturn` (ExitSuccess, "")
 
+    itWithOuter "accepts a domain over an enum, read with all its labels" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select status from payment_log" [] (Just [Column "Shop.Status" "payment_status" False ["PENDING", "PAID", "REFUNDED"]])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects a domain over an enum read without a label the enum has" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select status from payment_log" [] (Just [Column "Shop.Status" "payment_status" False ["PENDING", "PAID"]])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("which cannot read labels payment_status has: REFUNDED" `isInfixOf`)
+
     itWithOuter "rejects an enum sent with a label the database does not have" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID", "CANCELLED"]] Nothing]
         code `shouldBe` ExitFailure 1
@@ -853,7 +921,7 @@ inferredSpec = do
     itWithOuter "rejects a Postgres type the database does not have" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False []])]
         code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("type \"nosuchtype\" does not exist" `isInfixOf`)
+        out `shouldSatisfy` ("no such Postgres type: nosuchtype" `isInfixOf`)
 
     itWithOuter "warns about a nullable column read without a Maybe" \conn -> do
         (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [text])]

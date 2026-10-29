@@ -34,6 +34,7 @@ module Hasql.Check.Inferred (
     Domain (..),
     PgEnum (..),
     GEnum (..),
+    qualifiedName,
     Column (..),
     Params (..),
     Row (..),
@@ -65,6 +66,7 @@ import Data.ByteString (ByteString)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int16, Int32, Int64)
 import Data.Kind (Type)
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Proxy (Proxy (..))
 import Data.Scientific (Scientific)
 import Data.Text (Text)
@@ -79,6 +81,7 @@ import Hasql.Encoders qualified as E
 import Hasql.Statement (Statement)
 import Hasql.Statement qualified as Statement
 import Language.Haskell.TH.Syntax (Lift)
+import PostgresqlSyntax qualified as Ast
 import Prelude
 
 
@@ -234,11 +237,19 @@ instance (KnownSymbol name, Generic a, GEnum (Rep a)) => Value (PgEnum name a) w
     decodeValue = uncurry D.enum (qualifiedName (Text.pack (symbolVal (Proxy @name)))) (\t -> PgEnum . to <$> lookup t gvalues)
 
 
--- | A type's schema, if its name has one, and its own name.
+-- | A type's schema, if its name has one, and its own name, as the
+-- identifiers they are: the name is SQL, as a cast takes it, so a quoted
+-- part is taken as it is and an unquoted one in lower case, as Postgres
+-- takes them.
 qualifiedName :: Text -> (Maybe Text, Text)
-qualifiedName n = case Text.breakOn "." n of
-    (own, "") -> (Nothing, own)
-    (schema, rest) -> (Just schema, Text.drop 1 rest)
+qualifiedName n = case Ast.parse mempty n of
+    Right (Ast.Typename _ (Ast.GenericTypeSimpleTypename (Ast.GenericType i Nothing _)) _ _) -> (Nothing, ident i)
+    Right (Ast.Typename _ (Ast.GenericTypeSimpleTypename (Ast.GenericType schema (Just (Ast.Attrs (i :| _))) _)) _ _) -> (Just (ident schema), ident i)
+    _ -> (Nothing, n)
+  where
+    ident = \case
+        Ast.QuotedIdent t -> t
+        Ast.UnquotedIdent t -> t
 
 
 -- | The constructors of an enumeration, by name.

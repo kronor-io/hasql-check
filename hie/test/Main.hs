@@ -33,8 +33,35 @@ typeCases =
     ]
 
 
+-- | A row type's columns: the oracle is the type itself.
+columnCases :: [(String, Ty, [(Ty, Bool)])]
+columnCases =
+    [ ("a tuple", Con "GHC.Tuple" "Tuple2" [int64, maybe' text], [(int64, False), (text, True)])
+    , ("a newtype named like a tuple", tupleId, [(tupleId, False)])
+    , ("a type with a number in it", amount, [(amount, False)])
+    , ("a Maybe of another module", otherMaybe, [(otherMaybe, False)])
+    ]
+  where
+    int64 = Con "GHC.Internal.Int" "Int64" []
+    text = Con "Data.Text.Internal" "Text" []
+    maybe' a = Con "GHC.Internal.Maybe" "Maybe" [a]
+    tupleId = Con "Shop" "TupleId" []
+    amount = Con "Shop" "Amount" [OtherLit "2"]
+    otherMaybe = Con "Shop" "Maybe" [int64]
+
+
 main :: IO ()
 main = do
+    columnFailures <-
+        traverse
+            ( \(name, t, expected) -> do
+                let found = columnTypes False t
+                unless (found == expected) $
+                    putStrLn (name <> ": expected " <> show expected <> ", found " <> show found)
+                pure (found /= expected)
+            )
+            columnCases
+    unless (ground (Con "Shop" "Amount" [OtherLit "2"])) $ putStrLn "a type with a number in it is not concrete"
     typeFailures <-
         traverse
             ( \(name, params, rows, expected) -> do
@@ -53,4 +80,6 @@ main = do
                 pure (found /= expected)
             )
             cases
-    if or (failures <> typeFailures) then exitFailure else putStrLn (show (length cases + length typeCases) <> " passed")
+    if or (failures <> typeFailures <> columnFailures) || not (ground (Con "Shop" "Amount" [OtherLit "2"]))
+        then exitFailure
+        else putStrLn (show (length cases + length typeCases + length columnCases + 1) <> " passed")

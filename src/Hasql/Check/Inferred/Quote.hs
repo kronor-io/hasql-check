@@ -32,7 +32,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word32)
 import Hasql.Check (parsePlainStmt, quoterSettings)
-import Hasql.Check.Annotate (annotate, typename)
+import Hasql.Check.Annotate (annotate, typename, untypedLiterals)
 import Hasql.Check.Inferred (Piece (..), Template (..), render)
 import Hasql.Check.Inferred.TH (template)
 import Hasql.Check.Nullability (query)
@@ -154,22 +154,28 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                             (Just readAs, _)
                                 | length found /= length readAs ->
                                     pure ["the statement returns " <> count "column" (length found) <> ", but the Haskell type reads " <> show (length readAs)]
-                            -- A CALL cannot be wrapped, so its columns are not
-                            -- cast: they must already be of the types read.
-                            (Just readAs, Nothing) -> do
+                            (Just readAs, wrapped) -> do
                                 expected <- traverse (oid . fst) readAs
-                                sequence
-                                    [ (\pg -> "column " <> show i <> " (" <> name <> ") is " <> pg <> ", but is read as " <> Text.unpack c.haskellType) <$> nameOf found'
-                                    | (i :: Int, c, (name, found'), Just e) <- zip4 [1 ..] (concat q.row) found expected
-                                    , found' /= e
-                                    ]
-                            (Just readAs, Just _) -> do
-                                expected <- traverse (oid . fst) readAs
-                                fmap concat . sequence $
-                                    [ conversionError i name c found' e
-                                    | (i :: Int, c, (name, found'), Just e) <- zip4 [1 ..] (concat q.row) found expected
-                                    , found' /= e
-                                    ]
+                                let literals = either (const []) untypedLiterals (parsePlainStmt False q.sql)
+                                    missing = [Text.unpack name | ((name, _), Nothing) <- zip readAs expected]
+                                if not (null missing)
+                                    then pure ["no such Postgres type: " <> unwords missing]
+                                    else
+                                        fmap concat . sequence $
+                                            [ case wrapped of
+                                                -- A CALL cannot be wrapped, so its
+                                                -- columns are not cast: they must
+                                                -- already be of the types read, or
+                                                -- domains over them.
+                                                Nothing -> do
+                                                    same <- sameBase found' e
+                                                    if same then pure [] else (\pg -> ["column " <> show i <> " (" <> name <> ") is " <> pg <> ", but is read as " <> Text.unpack c.haskellType]) <$> nameOf found'
+                                                Just _ -> case lookup i literals of
+                                                    Just literal -> literalError i name c literal
+                                                    Nothing -> conversionError i name c found' e
+                                            | (i :: Int, c, (name, found'), Just e) <- zip4 [1 ..] (concat q.row) found expected
+                                            , found' /= e
+                                            ]
                         -- What is sent, wrapped in its casts.
                         sent <-
                             if null (paramErrors <> columnErrors)
@@ -203,15 +209,19 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                 Nothing -> [Text.unpack c.postgres <> " is sent and read as an enum, but is not one in the database"]
                 Just labels -> compare' c.postgres labels
     list = Text.unpack . Text.intercalate ", "
-    -- An array's elements' labels, if it is an array of an enum.
+    -- The labels of the enum a type is, through any domains over it and
+    -- arrays of it.
     enumLabels name =
         query
             conn
             ( mconcat
-                [ "SELECT e.enumlabel FROM pg_catalog.pg_enum e WHERE e.enumtypid ="
-                , " (SELECT CASE WHEN typcategory = 'A' THEN typelem ELSE oid END FROM pg_catalog.pg_type WHERE oid = to_regtype("
+                [ "WITH RECURSIVE t (oid, typtype, typcategory, typbasetype, typelem) AS ("
+                , "SELECT oid, typtype, typcategory, typbasetype, typelem FROM pg_catalog.pg_type WHERE oid = to_regtype("
                 , quoteLiteral name
-                , ")) ORDER BY e.enumsortorder"
+                , ") UNION ALL SELECT p.oid, p.typtype, p.typcategory, p.typbasetype, p.typelem FROM pg_catalog.pg_type p, t"
+                , " WHERE p.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typcategory = 'A' THEN t.typelem END)"
+                , " SELECT e.enumlabel FROM pg_catalog.pg_enum e WHERE e.enumtypid = (SELECT oid FROM t WHERE typtype = 'e')"
+                , " ORDER BY e.enumsortorder"
                 ]
             )
             <&> \case
@@ -233,6 +243,11 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                                 n <- d.nfields
                                 found <- traverse (\i -> (,) <$> (maybe "?column?" (Text.unpack . Text.decodeUtf8Lenient) <$> d.fname i) <*> d.ftype i) [0 .. n - 1]
                                 pure (Right found)
+    -- A literal is converted once and for all: try it.
+    literalError i name c literal =
+        query conn (Text.encodeUtf8 (mconcat ["SELECT (", literal, ") :: ", c.postgres])) <&> \case
+            Right _ -> []
+            Left err -> [concat ["column ", show i, " (", name, ") is ", Text.unpack literal, ", which cannot be read as ", Text.unpack c.haskellType, ": ", err]]
     conversionError i name c from to = do
         converts <- convertsWithoutBeingTold from to
         fromName <- nameOf from
@@ -286,14 +301,26 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                 , base from
                 , " = "
                 , base to
+                , ", (SELECT typcategory = 'S' FROM pg_catalog.pg_type WHERE oid = "
+                , base to
+                , ")"
                 ]
             )
             >>= \case
-                Right [[context, same]] -> pure (same == Just "t" || context `elem` [Just "i", Just "a"])
+                Right [[context, same, toString]] -> pure (same == Just "t" || toString == Just "t" || context `elem` [Just "i", Just "a"])
                 _ -> pure False
+    -- Through every domain a domain is over.
     base o =
-        let o' = ByteString.Char8.pack (show o)
-         in mconcat ["(SELECT CASE WHEN typtype = 'd' THEN typbasetype ELSE oid END FROM pg_catalog.pg_type WHERE oid = ", o', ")"]
+        mconcat
+            [ "(WITH RECURSIVE d (oid, typtype, typbasetype) AS (SELECT oid, typtype, typbasetype FROM pg_catalog.pg_type WHERE oid = "
+            , ByteString.Char8.pack (show o)
+            , " UNION ALL SELECT t.oid, t.typtype, t.typbasetype FROM pg_catalog.pg_type t, d WHERE t.oid = d.typbasetype AND d.typtype = 'd')"
+            , " SELECT oid FROM d WHERE typtype <> 'd')"
+            ]
+    sameBase from to =
+        query conn (mconcat ["SELECT ", base from, " = ", base to]) <&> \case
+            Right [[Just "t"]] -> True
+            _ -> False
     count :: String -> Int -> String
     count what 1 = "1 " <> what
     count what k = unwords [show k, what <> "s"]
