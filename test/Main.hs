@@ -573,8 +573,8 @@ piecesSpec = do
     it "takes an enum's name as SQL, as a cast does, for the codecs" $
         map
             qualifiedName
-            ["payment_state", "Public.Payment_State", "\"payment_state\"", "\"My Schema\".\"x.y\""]
-            `shouldBe` [(Nothing, "payment_state"), (Just "public", "payment_state"), (Nothing, "payment_state"), (Just "My Schema", "x.y")]
+            ["payment_state", "Public.Payment_State", "\"payment_state\"", "\"My Schema\".\"x.y\"", "app.public.payment_state"]
+            `shouldBe` [(Nothing, "payment_state"), (Just "public", "payment_state"), (Nothing, "payment_state"), (Just "My Schema", "x.y"), (Just "public", "payment_state")]
 
     it "rejects SQL it cannot parse" $
         Inferred.template "select from where" `shouldSatisfy` isLeft
@@ -588,6 +588,12 @@ data PaymentState = PENDING | PAID | REFUNDED
 newtype Qualified = Qualified PaymentState
     deriving stock (Eq, Show)
     deriving (Value) via PgEnum "public.\"payment_state\"" PaymentState
+
+
+-- The test database is "postgres".
+newtype InDatabase = InDatabase PaymentState
+    deriving stock (Eq, Show)
+    deriving (Value) via PgEnum "postgres.public.payment_state" PaymentState
 
 
 newtype Status = Status PaymentState
@@ -676,6 +682,10 @@ runtimeSpec = do
     itWithOuter "reads an enum named with its schema and in quotes" \conn ->
         runStatement conn (1 :: Int32) [Inferred.singletonStatement|select state from payment where id = $1|]
             `shouldReturn` Qualified PAID
+
+    itWithOuter "reads an enum named with the database too" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select state from payment where id = $1|]
+            `shouldReturn` InDatabase PAID
 
     itWithOuter "reads a domain over an enum" \conn ->
         runStatement conn (1 :: Int32) [Inferred.singletonStatement|select status from payment_log where id = $1|]

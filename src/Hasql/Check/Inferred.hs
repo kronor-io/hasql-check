@@ -63,10 +63,10 @@ module Hasql.Check.Inferred (
 
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
+import Data.Foldable (toList)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int16, Int32, Int64)
 import Data.Kind (Type)
-import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Proxy (Proxy (..))
 import Data.Scientific (Scientific)
 import Data.Text (Text)
@@ -243,8 +243,14 @@ instance (KnownSymbol name, Generic a, GEnum (Rep a)) => Value (PgEnum name a) w
 -- takes them.
 qualifiedName :: Text -> (Maybe Text, Text)
 qualifiedName n = case Ast.parse mempty n of
-    Right (Ast.Typename _ (Ast.GenericTypeSimpleTypename (Ast.GenericType i Nothing _)) _ _) -> (Nothing, ident i)
-    Right (Ast.Typename _ (Ast.GenericTypeSimpleTypename (Ast.GenericType schema (Just (Ast.Attrs (i :| _))) _)) _ _) -> (Just (ident schema), ident i)
+    Right (Ast.Typename _ (Ast.GenericTypeSimpleTypename (Ast.GenericType i attrs _)) _ _) ->
+        -- The last part is the type, and the one before it its schema; a
+        -- part before that is the database, which must be the one connected
+        -- to.
+        case reverse (i : maybe [] (\(Ast.Attrs as) -> toList as) attrs) of
+            own : schema : _ -> (Just (ident schema), ident own)
+            own : _ -> (Nothing, ident own)
+            [] -> (Nothing, n)
     _ -> (Nothing, n)
   where
     ident = \case
