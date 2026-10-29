@@ -39,7 +39,9 @@ placeholder name = typename name False
 
 
 -- | The statement with each occurrence of the @n@th parameter, counting from
--- 1, cast to the type given for it, if one is.
+-- 1, cast to the type given for it, if one is. A parameter that is
+-- subscripted or has a field taken, @$1['key']@, is cast before that:
+-- @($1 :: jsonb)['key']@.
 annotate :: (Int -> Maybe Ast.Typename) -> Ast.PreparableStmt -> Ast.PreparableStmt
 annotate param = go
   where
@@ -48,4 +50,9 @@ annotate param = go
         Just (Ast.CExprAExpr p@(Ast.ParamCExpr n Nothing)) | Just t <- param n, Just r <- cast (Ast.TypecastAExpr (Ast.CExprAExpr p) t) -> r
         _ -> case cast x of
             Just (Ast.CExprBExpr p@(Ast.ParamCExpr n Nothing)) | Just t <- param n, Just r <- cast (Ast.TypecastBExpr (Ast.CExprBExpr p) t) -> r
-            _ -> gmapT go x
+            _ -> case cast x of
+                Just (Ast.ParamCExpr n (Just indirection))
+                    | Just t <- param n
+                    , Just r <- cast (Ast.InParensCExpr (Ast.TypecastAExpr (Ast.CExprAExpr (Ast.ParamCExpr n Nothing)) t) (Just indirection)) ->
+                        r
+                _ -> gmapT go x
