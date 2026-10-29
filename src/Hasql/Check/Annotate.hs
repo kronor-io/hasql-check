@@ -46,7 +46,7 @@ typename name nullable =
 -- column, cast to the type given for its slot, if one is.
 --
 -- Result columns are annotated only where each one can be told apart: not
--- behind a @*@, nor in a @VALUES@ list. A statement with such a column keeps
+-- behind a @*@ or a @t.*@, nor in a @VALUES@ list. A statement with such a column keeps
 -- its result columns as they are, and its results must then have exactly the
 -- types the Haskell values are read as.
 annotate :: (Slot -> Maybe Ast.Typename) -> Ast.PreparableStmt -> Ast.PreparableStmt
@@ -88,7 +88,15 @@ results slot = \case
         Ast.NoParensSelectWithParens s -> Ast.NoParensSelectWithParens <$> noParens s
         Ast.WithParensSelectWithParens s -> Ast.WithParensSelectWithParens <$> withParens s
 
-    noParens (Ast.SelectNoParens w c s l f) = (\c' -> Ast.SelectNoParens w c' s l f) <$> clause c
+    -- SELECT DISTINCT may only be ordered by what it selects, so the ORDER
+    -- BY follows the annotations.
+    noParens (Ast.SelectNoParens w c s l f) = do
+        c' <- clause c
+        let s' = case (c, c') of
+                (Ast.SimpleSelectSelectClause (Ast.NormalSimpleSelect (Just (Ast.DistinctTargeting Nothing (Ast.TargetList old))) _ _ _ _ _ _), Ast.SimpleSelectSelectClause (Ast.NormalSimpleSelect (Just (Ast.DistinctTargeting Nothing (Ast.TargetList new))) _ _ _ _ _ _)) ->
+                    replaceEverywhere (zip (concatMap targetExpr old) (concatMap targetExpr new)) s
+                _ -> s
+        pure (Ast.SelectNoParens w c' s' l f)
 
     clause = \case
         Ast.SimpleSelectSelectClause s -> Ast.SimpleSelectSelectClause <$> simple s
@@ -135,12 +143,45 @@ normalTargets = targetList
 
 targetEl :: (Slot -> Maybe Ast.Typename) -> Int -> Ast.TargetEl -> Maybe Ast.TargetEl
 targetEl slot n = \case
-    Ast.AliasedExprTargetEl a i -> Just (Ast.AliasedExprTargetEl (column a) i)
-    Ast.ImplicitlyAliasedExprTargetEl a i -> Just (Ast.ImplicitlyAliasedExprTargetEl (column a) i)
-    Ast.ExprTargetEl a -> Just (Ast.ExprTargetEl (column a))
+    Ast.AliasedExprTargetEl a i -> (`Ast.AliasedExprTargetEl` i) <$> column a
+    Ast.ImplicitlyAliasedExprTargetEl a i -> (`Ast.ImplicitlyAliasedExprTargetEl` i) <$> column a
+    Ast.ExprTargetEl a -> Ast.ExprTargetEl <$> column a
     Ast.AsteriskTargetEl -> Nothing
   where
-    column e = maybe e (Ast.TypecastAExpr (Ast.CExprAExpr (Ast.InParensCExpr e Nothing))) (slot (Column n))
+    column e
+        | expands e = Nothing
+        | otherwise = Just (maybe e (Ast.TypecastAExpr (Ast.CExprAExpr (Ast.InParensCExpr e Nothing))) (slot (Column n)))
+
+
+-- | Whether an expression expands to several columns, as @t.*@ and
+-- @(row).*@ do.
+expands :: Ast.AExpr -> Bool
+expands = \case
+    Ast.CExprAExpr (Ast.ColumnrefCExpr (Ast.Columnref _ (Just i))) -> star i
+    Ast.CExprAExpr (Ast.InParensCExpr _ (Just i)) -> star i
+    Ast.CExprAExpr (Ast.ParamCExpr _ (Just i)) -> star i
+    Ast.CExprAExpr (Ast.SelectWithParensCExpr _ (Just i)) -> star i
+    _ -> False
+  where
+    star (Ast.Indirection els) = NonEmpty.last els == Ast.AllIndirectionEl
+
+
+targetExpr :: Ast.TargetEl -> [Ast.AExpr]
+targetExpr = \case
+    Ast.AliasedExprTargetEl a _ -> [a]
+    Ast.ImplicitlyAliasedExprTargetEl a _ -> [a]
+    Ast.ExprTargetEl a -> [a]
+    Ast.AsteriskTargetEl -> []
+
+
+-- | Replace every occurrence of the given expressions.
+replaceEverywhere :: Data a => [(Ast.AExpr, Ast.AExpr)] -> a -> a
+replaceEverywhere replacements = go
+  where
+    go :: Data b => b -> b
+    go x = case cast x of
+        Just e | Just replacement <- lookup e replacements, Just r <- cast replacement -> r
+        _ -> gmapT go x
 
 
 numbered :: (Int -> a -> Maybe b) -> NonEmpty a -> Maybe (NonEmpty b)

@@ -111,35 +111,44 @@ postgresType c = case lookup c.haskellType known of
             )
 
 
--- | Whether the statement returns as many columns as the Haskell type reads,
--- each of the type it is read as. Annotated columns always are; a column
--- behind a @*@ is not annotated, and must already be.
+-- | Whether the statement takes as many parameters as the Haskell type
+-- sends, and returns as many columns as it reads, each of the type it is
+-- read as. Annotated columns always are; a column behind a @*@ is not
+-- annotated, and must already be.
 checkShape :: Pqi.Connection -> Inferred -> ByteString -> IO [String]
-checkShape conn q rendered = case q.row of
-    Nothing -> pure []
-    Just row -> do
-        expected <- traverse (oid . fst) =<< either (const (pure [])) pure (traverse postgresType row)
-        prepared <- conn.prepare "" rendered Nothing
-        status <- maybe (pure Pqi.FatalError) (.resultStatus) prepared
-        if status /= Pqi.CommandOk
-            then pure []
-            else
-                conn.describePrepared "" >>= \case
-                    Nothing -> pure []
-                    Just d -> do
-                        n <- d.nfields
-                        found <- traverse (\i -> (,) <$> (maybe "?column?" (Text.unpack . Text.decodeUtf8Lenient) <$> d.fname i) <*> d.ftype i) [0 .. n - 1]
-                        if length found /= length row
-                            then pure ["the statement returns " <> columns (length found) <> ", but the Haskell type reads " <> show (length row)]
-                            else
+checkShape conn q rendered = do
+    expected <- traverse (oid . fst) =<< either (const (pure [])) pure (traverse postgresType (concat q.row))
+    prepared <- conn.prepare "" rendered Nothing
+    status <- maybe (pure Pqi.FatalError) (.resultStatus) prepared
+    if status /= Pqi.CommandOk
+        then pure []
+        else
+            conn.describePrepared "" >>= \case
+                Nothing -> pure []
+                Just d -> do
+                    nparams <- d.nparams
+                    n <- d.nfields
+                    found <- traverse (\i -> (,) <$> (maybe "?column?" (Text.unpack . Text.decodeUtf8Lenient) <$> d.fname i) <*> d.ftype i) [0 .. n - 1]
+                    let paramErrors =
+                            [ "the statement takes " <> count "parameter" (fromIntegral nparams) <> ", but the Haskell type sends " <> show (length q.params)
+                            | fromIntegral nparams /= length q.params
+                            ]
+                    columnErrors <- case q.row of
+                        Nothing -> pure []
+                        Just row
+                            | length found /= length row ->
+                                pure ["the statement returns " <> count "column" (length found) <> ", but the Haskell type reads " <> show (length row)]
+                            | otherwise ->
                                 sequence
                                     [ (\pg -> "column " <> show i <> " (" <> name <> ") is " <> pg <> ", but is read as " <> Text.unpack c.haskellType) <$> nameOf t
                                     | (i :: Int, c, (name, t), Just e) <- zip4 [1 ..] row found expected
                                     , t /= e
                                     ]
+                    pure (paramErrors <> columnErrors)
   where
-    columns 1 = "1 column"
-    columns n = show n <> " columns"
+    count :: String -> Int -> String
+    count what 1 = "1 " <> what
+    count what k = unwords [show k, what <> "s"]
     oid :: Text -> IO (Maybe Word32)
     oid name =
         query conn (mconcat ["SELECT ", quoteLiteral name, "::regtype::oid::text"]) >>= \case

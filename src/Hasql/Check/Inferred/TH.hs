@@ -63,13 +63,20 @@ resultlessStatement = quoter \p -> [|resultless $p|]
 pieces :: Text -> Either String [Piece]
 pieces sql = do
     stmt <- parseStmt sql
-    let rendered = Text.decodeUtf8Lenient (renderStmt (annotate (\s -> Just (typename (marker s) False)) stmt))
-    pure (cut rendered)
+    -- A marker the statement does not already contain, in a string literal
+    -- say, so that only the annotations are cut out.
+    let plain = Text.decodeUtf8Lenient (renderStmt stmt)
+        prefix = until (not . (`Text.isInfixOf` plain)) (<> "x_") "hasql_check_slot_"
+    pure (cutWith prefix (Text.decodeUtf8Lenient (renderStmt (annotate (\s -> Just (typename (marker prefix s) False)) stmt))))
   where
-    marker = \case
+    marker prefix = \case
         Param n -> prefix <> "p" <> Text.pack (show n)
         Column n -> prefix <> "c" <> Text.pack (show n)
 
+
+cutWith :: Text -> Text -> [Piece]
+cutWith prefix = cut
+  where
     cut t = case Text.breakOn (" :: " <> prefix) t of
         (before, "") -> [Sql before | not (Text.null before)]
         (before, rest) ->
@@ -80,5 +87,3 @@ pieces sql = do
         Just ('p', n) | Just i <- readMaybe (Text.unpack n) -> [ParamType i]
         Just ('c', n) | Just i <- readMaybe (Text.unpack n) -> [ColumnType i]
         _ -> [Sql (" :: " <> prefix <> slot)]
-
-    prefix = "hasql_check_slot_"

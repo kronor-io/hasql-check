@@ -33,9 +33,14 @@ flag lint
 
 executable hasql-check-hie
   main-is:            Main.hs
+  other-modules:      Source
   hs-source-dirs:     app
   default-language:   GHC2021
-  default-extensions: LambdaCase
+  default-extensions:
+    DerivingStrategies
+    LambdaCase
+    OverloadedRecordDot
+
   ghc-options:
     -Wall -Wcompat -Widentities -Wincomplete-record-updates
     -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
@@ -49,3 +54,21 @@ executable hasql-check-hie
     , containers
     , ghc         >=9.12 && <9.13
     , text
+
+test-suite hasql-check-hie-test
+  type:               exitcode-stdio-1.0
+  main-is:            Main.hs
+  other-modules:      Source
+  hs-source-dirs:     test app
+  default-language:   GHC2021
+  default-extensions:
+    DerivingStrategies
+    LambdaCase
+    OverloadedRecordDot
+
+  ghc-options:        -Wall
+
+  if flag(lint)
+    ghc-options: -Werror
+
+  build-depends:      base >=4.11 && <10

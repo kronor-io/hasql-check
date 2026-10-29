@@ -23,8 +23,7 @@
 -- project is built with.
 module Main where
 
-import Data.ByteString.Char8 qualified as B
-import Data.Char (isAlphaNum, ord)
+import Data.Char (ord)
 import Data.List (intercalate)
 import Data.Map qualified as Map
 import Data.Text qualified as Text
@@ -36,8 +35,9 @@ import GHC.Iface.Type (IfaceTyCon (..))
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Cache (initNameCache)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.SrcLoc (RealSrcSpan, srcSpanEndCol, srcSpanEndLine, srcSpanStartCol, srcSpanStartLine)
+import GHC.Types.SrcLoc (srcSpanEndCol, srcSpanEndLine, srcSpanStartCol, srcSpanStartLine)
 import GHC.Unit.Module (moduleName, moduleNameString)
+import Source (Quote (..), quoteAt)
 import System.Environment (getArgs)
 import Text.Printf (printf)
 
@@ -56,13 +56,16 @@ main = do
         let hf = hie_file_result result
             toTy = convert . flip recoverFullType (hie_types hf)
             found = Map.fromListWith (flip (<>)) [(s, [t]) | (s, t) <- concatMap (collect toTy) (Map.elems (getAsts (hie_asts hf)))]
-            src = hie_hs_src hf
+            source = lines (Text.unpack (Text.decodeUtf8Lenient (hie_hs_src hf)))
         mapM_
             ( \(s, here) ->
                 let params = [p | Con "Hasql.Check.Inferred" "Params" [p] <- here, ground p]
                     rows = [r | Con "Hasql.Check.Inferred" "Row" [r] <- here, ground r]
-                 in case params of
-                        p : _ | isQuote src s -> putStrLn (quote (hie_hs_file hf) src s p (safeHead rows))
+                    -- The enclosing declarations hold the same dictionaries,
+                    -- but only the quote's own span starts after "[quoter|".
+                    at = quoteAt source (srcSpanStartLine s, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s)
+                 in case (params, at) of
+                        (p : _, Just q) -> putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q p (safeHead rows))
                         _ -> pure ()
             )
             (Map.toList found)
@@ -80,46 +83,18 @@ main = do
     safeHead [] = Nothing
 
 
--- | Whether the span is a quote's: whether it starts right after "[quoter|".
--- The enclosing declarations hold the same dictionaries.
-isQuote :: B.ByteString -> RealSrcSpan -> Bool
-isQuote src s =
-    let lineText = lines (Text.unpack (Text.decodeUtf8Lenient src)) !! (srcSpanStartLine s - 1)
-     in srcSpanStartCol s >= 2 && lineText !! (srcSpanStartCol s - 2) == '|'
-
-
 -- | One quote's line of output.
-quote :: FilePath -> B.ByteString -> RealSrcSpan -> Ty -> Maybe Ty -> String
-quote file src s params row =
+output :: FilePath -> Int -> Quote -> Ty -> Maybe Ty -> String
+output file line q params row =
     object
         [ ("file", string file)
         , ("line", show line)
-        , ("column", show (quoteColumn + 1))
-        , ("quoter", string quoter)
-        , ("sql", string body)
+        , ("column", show q.column)
+        , ("quoter", string q.quoter)
+        , ("sql", string q.body)
         , ("params", columns True params)
         , ("row", maybe "null" (columns False) row)
         ]
-  where
-    srcLines = lines (Text.unpack (Text.decodeUtf8Lenient src))
-    line = srcSpanStartLine s
-    lineText = srcLines !! (line - 1)
-    -- The span starts at the quote's body, after "[quoter|".
-    bodyStart = srcSpanStartCol s - 1
-    quoteColumn = lastBracket (take bodyStart lineText)
-    quoter = takeWhile (\c -> isAlphaNum c || c `elem` ("._'" :: String)) (drop (quoteColumn + 1) lineText)
-    -- The span ends after the closing "|]".
-    body = slice (line, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s - 2)
-    slice (l1, c1) (l2, c2)
-        | l1 == l2 = take (c2 - c1) (drop (c1 - 1) (srcLines !! (l1 - 1)))
-        | otherwise =
-            intercalate "\n" $
-                [drop (c1 - 1) (srcLines !! (l1 - 1))]
-                    <> [srcLines !! (l - 1) | l <- [l1 + 1 .. l2 - 1]]
-                    <> [take (c2 - 1) (srcLines !! (l2 - 1))]
-    lastBracket prefix = case [i | (i, '[') <- zip [0 ..] prefix] of
-        [] -> 0
-        is -> last is
 
 
 -- | A parameter or row type, as the list of its columns.

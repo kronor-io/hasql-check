@@ -545,6 +545,18 @@ piecesSpec = do
         sent "select * from t where id = $1" ["int8"] ["int8", "text"]
             `shouldBe` Right "SELECT * FROM t WHERE id = $1 :: int8"
 
+    it "leaves the result columns behind a qualified * alone" $
+        sent "select t.*, (r).* from t" [] ["int8", "text"]
+            `shouldBe` Right "SELECT t.*, (r).* FROM t"
+
+    it "orders SELECT DISTINCT by the annotated columns" $
+        sent "select distinct id, name from t order by id, name desc" [] ["int8", "text"]
+            `shouldBe` Right "SELECT DISTINCT (id) :: int8, (name) :: text FROM t ORDER BY (id) :: int8, (name) :: text DESC"
+
+    it "keeps text in a literal that looks like an annotation" $
+        sent "select ' :: hasql_check_slot_c1'" [] ["text"]
+            `shouldBe` Right "SELECT (' :: hasql_check_slot_c1') :: text"
+
     it "leaves a column the Haskell type does not read unannotated" $
         sent "select a, b from t" [] ["int8"]
             `shouldBe` Right "SELECT (a) :: int8, (b) FROM t"
@@ -579,6 +591,10 @@ runtimeSpec = do
     itWithOuter "reads a tuple, with a Maybe for a NULL" \conn ->
         runStatement conn (1 :: Int32) [Inferred.maybeStatement|select label, null from tag where id = $1|]
             `shouldReturn` Just ("red" :: Text, Nothing :: Maybe Text)
+
+    itWithOuter "sends a literal that looks like an annotation unchanged" \conn ->
+        runStatement conn () [Inferred.singletonStatement|select ' :: hasql_check_slot_c1'|]
+            `shouldReturn` (" :: hasql_check_slot_c1" :: Text)
 
     itWithOuter "runs a statement without rows" \conn ->
         runStatement conn ("blue" :: Text, 2 :: Int64) [Inferred.resultlessStatement|insert into tag (label, id) values ($1, $2)|]
@@ -642,6 +658,24 @@ inferredSpec = do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select * from tag" [] (Just [int64, text])]
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("column 1 (id) is integer, but is read as GHC.Internal.Int.Int64" `isInfixOf`)
+
+    itWithOuter "accepts a qualified * whose columns have the types read" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select a.* from account a" [] (Just [int32, text, "?" <> text])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts SELECT DISTINCT ordered by a column it annotates" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select distinct id from tag order by id" [] (Just [int64])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects a Haskell type that sends more parameters than the statement takes" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 1" [int64] (Just [int32])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("the statement takes 0 parameters, but the Haskell type sends 1" `isInfixOf`)
+
+    itWithOuter "rejects a Haskell type that sends fewer, without rows too" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "delete from tag where id = $1" [] Nothing]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("the statement takes 1 parameter, but the Haskell type sends 0" `isInfixOf`)
 
     itWithOuter "rejects a Haskell type it knows no Postgres type for" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just ["Shop.Email"])]

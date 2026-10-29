@@ -508,7 +508,7 @@ The warnings go to stderr in GHC's format, rather than through GHC, so
 - They need the plan, so a statement that reads a session setting the
   connection lacks is only partly checked; see [Running it in CI](#running-it-in-ci).
 - The quoters without annotations know only the types in the table above:
-  no arrays, enums, composite types or `newtype`s yet. Behind a `SELECT *`
+  no arrays, enums, composite types or `newtype`s yet. Behind a `*` or `t.*`
   they cannot annotate the result columns, which must then have exactly the
   types the Haskell values are read as.
 - The default build parses statements as upstream hasql-th does. Building with
