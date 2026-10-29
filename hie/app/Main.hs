@@ -40,14 +40,11 @@ import GHC.Types.Name.Cache (initNameCache)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (srcSpanEndCol, srcSpanEndLine, srcSpanStartCol, srcSpanStartLine)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import Source (Quote (..), Types (..), quoteAt, typesOf)
+import Source (Quote (..), Ty (..), Types (..), columnTypes, ground, quoteAt, typesOf)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 import Text.Printf (printf)
-
-
-data Ty = Con String String [Ty] | Lit String | Var
 
 
 main :: IO ()
@@ -119,15 +116,8 @@ output file line q params row =
 -- | A parameter or row type, as the list of its columns, with the Postgres
 -- type of each.
 columns :: Bool -> Ty -> [String] -> String
-columns isParams t names = list (zipWith column (split t) names)
+columns isParams t names = list (zipWith (\(c, nullable) postgres -> one c postgres nullable) (columnTypes isParams t) names)
   where
-    split = \case
-        Con _ "Unit" [] | isParams -> []
-        Con _ name args | take 5 name == "Tuple" -> args
-        other -> [other]
-    column c postgres = case c of
-        Con _ "Maybe" [inner] -> one inner postgres True
-        _ -> one c postgres False
     one c postgres nullable =
         object
             [ ("type", string (qualified c))
@@ -137,6 +127,7 @@ columns isParams t names = list (zipWith column (split t) names)
     qualified = \case
         Con m n _ -> if null m then n else m <> "." <> n
         Lit s -> show s
+        OtherLit s -> s
         Var -> "?"
     list xs = "[" <> intercalate "," xs <> "]"
 
@@ -156,17 +147,12 @@ convert (Roll t) = case t of
     HForAllTy _ b -> convert b
     HCastTy a -> convert a
     HLitTy (IfaceStrTyLit s) -> Lit (unpackFS (getLexicalFastString s))
+    HLitTy (IfaceNumTyLit n) -> OtherLit (show n)
+    HLitTy (IfaceCharTyLit c) -> OtherLit (show c)
     _ -> Var
   where
     names :: Name -> (String, String)
     names n = (maybe "" (moduleNameString . moduleName) (nameModule_maybe n), occNameString (nameOccName n))
-
-
-ground :: Ty -> Bool
-ground = \case
-    Var -> False
-    Lit _ -> True
-    Con _ _ args -> all ground args
 
 
 object :: [(String, String)] -> String
