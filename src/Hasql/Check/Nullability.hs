@@ -29,9 +29,11 @@
 -- whether they can be null.
 module Hasql.Check.Nullability (
     Catalogue,
+    baseType,
     prepareSession,
-    Warning (..),
-    describe,
+    Annotation,
+    strip,
+    query,
     check,
     resultQuoters,
 ) where
@@ -55,6 +57,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word32)
 import Hasql.Check (renderStmt)
+import Hasql.Check.Finding (Finding (..), Rule (..))
 import PostgresqlSyntax qualified as Ast
 import Pqi qualified
 import Text.Read (readMaybe)
@@ -78,8 +81,17 @@ data Column = Column
     }
 
 
--- | Every column of every relation, by table OID and column number.
-newtype Catalogue = Catalogue (Map (Word32, Int32) Column)
+data Catalogue = Catalogue
+    { columns :: Map (Word32, Int32) Column
+    -- ^ Every column of every relation, by table OID and column number.
+    , domains :: Map Word32 Word32
+    -- ^ The base type of every domain.
+    }
+
+
+-- | A type with any domains it is built on looked through.
+baseType :: Catalogue -> Word32 -> Word32
+baseType catalogue t = maybe t (baseType catalogue) (Map.lookup t catalogue.domains)
 
 
 -- | Get the session ready for 'check': read the catalogue, and force generic
@@ -106,10 +118,19 @@ loadCatalogue conn = do
                 , "WHERE a.attnum > 0 AND NOT a.attisdropped"
                 ]
             )
+    domainRows <- query conn "SELECT oid::text, typbasetype::text FROM pg_catalog.pg_type WHERE typtype = 'd'"
     pure do
         rows <- result
-        Catalogue . Map.fromList <$> traverse row rows
+        columns <- Map.fromList <$> traverse row rows
+        domains <- Map.fromList <$> (domainRows >>= traverse domain)
+        pure (Catalogue columns domains)
   where
+    domain = \case
+        [Just t, Just base]
+            | Just t' <- readMaybe (ByteString.Char8.unpack t)
+            , Just base' <- readMaybe (ByteString.Char8.unpack base) ->
+                Right (t', base')
+        other -> Left ("Unexpected domain row: " <> show other)
     row = \case
         [Just rel, Just num, Just name, Just nn, Just view]
             | Just rel' <- readMaybe (ByteString.Char8.unpack rel)
@@ -374,8 +395,14 @@ statementName = "hasql_check_nullability"
 
 -- | The warnings for a statement that prepares. A statement this cannot take
 -- apart, or whose stripped form does not prepare, gets none.
-check :: Pqi.Connection -> Catalogue -> Ast.PreparableStmt -> IO [Warning]
-check conn (Catalogue catalogue) stmt = case strip stmt of
+check :: Pqi.Connection -> Catalogue -> Ast.PreparableStmt -> IO [Finding]
+check conn catalogue stmt = map toFinding <$> warningsFor conn catalogue stmt
+  where
+    toFinding w = Finding{rule = Nullable, subject = w.columnName, message = describe w}
+
+
+warningsFor :: Pqi.Connection -> Catalogue -> Ast.PreparableStmt -> IO [Warning]
+warningsFor conn catalogue stmt = case strip stmt of
     Nothing -> pure []
     Just (annotations, stripped) -> do
         prepared <- conn.prepare statementName (renderStmt stripped) Nothing
@@ -405,7 +432,7 @@ check conn (Catalogue catalogue) stmt = case strip stmt of
                                         )
                                 _ -> (False, False)
                             warn r = [Warning (fromIntegral i + 1) name r]
-                        pure case (annotation, planned, Map.lookup (table, tableColumn) catalogue) of
+                        pure case (annotation, planned, Map.lookup (table, tableColumn) catalogue.columns) of
                             (Just False, (_, True), _) -> []
                             (Just False, (True, _), _) -> warn "comes from the nullable side of an outer join"
                             (Just False, _, Just col)

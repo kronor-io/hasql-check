@@ -31,6 +31,8 @@ main = sydTest do
     describe "parseQuasiQuotes" lexerSpec
     describe "hasql-check" $ aroundAll withPostgres executableSpec
     describe "hasql-check --nullability" $ aroundAll withPostgres nullabilitySpec
+    describe "hasql-check --types" $ aroundAll withPostgres typesSpec
+    describe "suppressing warnings" $ aroundAll withPostgres suppressionSpec
     -- These share the process's environment and the module's one connection,
     -- so they run one at a time, in order.
     describe "Hasql.Check.TH" $ sequential $ doNotRandomiseExecutionOrder $ aroundAll withPostgres thSpec
@@ -114,7 +116,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create table note (account_id int4 not null references account, body text not null)"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents)"]
                 action conn
 
 
@@ -312,3 +314,141 @@ thSpec = do
         setEnv "HASQL_CHECK_DATABASE_URL" (Text.unpack conn)
         result <- quote Checked.resultlessStatement "delete from nowhere"
         result `shouldSatisfy` isLeft
+
+
+-- | Run with --types on one quote; return the exit code and output.
+types :: Text -> Text -> Text -> IO (ExitCode, String)
+types conn quoter statement =
+    runOn [] ["--database", Text.unpack conn, "--types"] ("f = [" <> quoter <> "|" <> statement <> "|]\n")
+
+
+typesSpec :: TestDef '[Text] ()
+typesSpec = do
+    itWithOuter "warns about a column read as a narrower type, without failing" \conn -> do
+        (code, out) <- types conn "vectorStatement" "select amount :: int4 from ledger"
+        code `shouldBe` ExitSuccess
+        out `shouldSatisfy` ("column 1 (amount) is annotated integer, but is a bigint: it may overflow" `isInfixOf`)
+
+    itWithOuter "warns only when asked" \conn ->
+        runOn [] ["--database", Text.unpack conn] "f = [vectorStatement|select amount :: int4 from ledger|]\n" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a column read as its own type, or a wider one" \conn ->
+        types conn "vectorStatement" "select amount :: int8, small :: int4, id :: numeric from ledger" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "does not check expressions" \conn ->
+        types conn "vectorStatement" "select count(*) :: int4, now() :: date from ledger" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "warns about lost precision" \conn -> do
+        (_, out) <- types conn "vectorStatement" "select rate :: float4 from ledger"
+        out `shouldSatisfy` ("is annotated real, but is a double precision: it may lose precision" `isInfixOf`)
+
+    itWithOuter "warns about a dropped time of day" \conn -> do
+        (_, out) <- types conn "vectorStatement" "select at :: date from ledger"
+        out `shouldSatisfy` ("is annotated date, but is a timestamptz" `isInfixOf`)
+
+    itWithOuter "looks through domains" \conn -> do
+        (_, out) <- types conn "vectorStatement" "select price :: int4 from ledger"
+        out `shouldSatisfy` ("column 1 (price) is annotated integer, but is a bigint" `isInfixOf`)
+
+    -- Postgres reports a result column of a domain type as the base type, but
+    -- a parameter assigned to one as the domain.
+    itWithOuter "looks through a domain a parameter is assigned to" \conn -> do
+        (_, out) <- types conn "resultlessStatement" "insert into ledger (id, amount, price) values ($1 :: int8, $2 :: int8, $3 :: numeric)"
+        out `shouldSatisfy` ("parameter $3 is annotated numeric, but is assigned to a bigint column: it may be rounded, or overflow" `isInfixOf`)
+
+    itWithOuter "warns about a parameter inserted into a narrower column" \conn -> do
+        (_, out) <- types conn "resultlessStatement" "insert into account (id, name) values ($1 :: int8, $2 :: text)"
+        out `shouldSatisfy` ("parameter $1 is annotated bigint, but is assigned to an integer column: it may overflow" `isInfixOf`)
+        out `shouldNotSatisfy` ("parameter $2" `isInfixOf`)
+
+    itWithOuter "accepts a parameter inserted into a column of its type" \conn ->
+        types conn "resultlessStatement" "insert into account (id, name) values ($1 :: int4, $2 :: text)" `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "checks parameters set by UPDATE, not those compared" \conn -> do
+        (_, out) <- types conn "resultlessStatement" "update ledger set small = $1 :: int4 where amount = $2 :: int4"
+        out `shouldSatisfy` ("parameter $1 is annotated integer, but is assigned to a smallint column" `isInfixOf`)
+        out `shouldNotSatisfy` ("parameter $2" `isInfixOf`)
+
+    itWithOuter "checks RETURNING along with the assignments" \conn -> do
+        (_, out) <- types conn "singletonStatement" "insert into account (id, name) values ($1 :: int8, $2 :: text) returning id :: int2"
+        out `shouldSatisfy` ("column 1 (id) is annotated smallint, but is an integer" `isInfixOf`)
+        out `shouldSatisfy` ("parameter $1" `isInfixOf`)
+
+
+-- | Run on a whole source with the given flags; return the exit code and output.
+checkSource :: Text -> [String] -> Text -> IO (ExitCode, String)
+checkSource conn flags = runOn [] (["--database", Text.unpack conn] <> flags)
+
+
+suppressionSpec :: TestDef '[Text] ()
+suppressionSpec = do
+    itWithOuter "a directive above the quote suppresses the finding it names" \conn ->
+        checkSource conn ["--nullability"] "-- hasql-check: allow nullable(nickname)\nf = [vectorStatement|select nickname :: text from account|]\n"
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "a directive suppresses only what it names, and says what it did not use" \conn -> do
+        (_, out) <- checkSource conn ["--nullability"] "-- hasql-check: allow nullable(name)\nf = [vectorStatement|select nickname :: text from account|]\n"
+        out `shouldSatisfy` ("column 1 (nickname) is annotated non-null" `isInfixOf`)
+        out `shouldSatisfy` ("allow nullable(name) suppresses nothing" `isInfixOf`)
+
+    itWithOuter "a directive applies only directly above the quote" \conn -> do
+        (_, out) <- checkSource conn ["--nullability"] "-- hasql-check: allow nullable(nickname)\n\nf = [vectorStatement|select nickname :: text from account|]\n"
+        out `shouldSatisfy` ("column 1 (nickname) is annotated non-null" `isInfixOf`)
+
+    itWithOuter "directives read every comment line directly above" \conn ->
+        checkSource
+            conn
+            ["--nullability", "--types"]
+            "f =\n    -- hasql-check: allow narrowing(amount)\n    -- Why: the amounts here are small.\n    -- hasql-check: allow nullable(nickname)\n    [vectorStatement|select nickname :: text, amount :: int4 from account, ledger|]\n"
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "a directive names parameters as $n" \conn ->
+        checkSource conn ["--types"] "-- hasql-check: allow narrowing($1)\nf = [resultlessStatement|insert into account (id, name) values ($1 :: int8, $2 :: text)|]\n"
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "a directive for a rule that was not checked is not reported" \conn ->
+        checkSource conn ["--nullability"] "-- hasql-check: allow narrowing(amount)\nf = [vectorStatement|select name :: text from account|]\n"
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "a malformed directive is reported" \conn -> do
+        (_, out) <- checkSource conn ["--nullability"] "-- hasql-check: permit nullable(nickname)\nf = [vectorStatement|select name :: text from account|]\n"
+        out `shouldSatisfy` ("directive not understood: permit nullable(nickname)" `isInfixOf`)
+
+    itWithOuter "--fail-on-warnings fails on a finding, not on a suppressed one" \conn -> do
+        (code, _) <- checkSource conn ["--nullability", "--fail-on-warnings"] "f = [vectorStatement|select nickname :: text from account|]\n"
+        code `shouldBe` ExitFailure 1
+        (suppressed, _) <- checkSource conn ["--nullability", "--fail-on-warnings"] "-- hasql-check: allow nullable(nickname)\nf = [vectorStatement|select nickname :: text from account|]\n"
+        suppressed `shouldBe` ExitSuccess
+
+    itWithOuter "a baseline ignores the findings it was written with, wherever the quote is" \conn ->
+        withSystemTempDirectory "hasql-check-baseline" \dir -> do
+            let baseline = dir </> "baseline"
+                flags = ["--nullability", "--fail-on-warnings"]
+            (written, _) <- checkSource conn (flags <> ["--write-baseline", baseline]) "f = [vectorStatement|select nickname :: text from account|]\n"
+            written `shouldBe` ExitFailure 1
+            contents <- readFile baseline
+            contents `shouldSatisfy` (" nullable nickname # " `isInfixOf`)
+            -- The same statement, laid out differently and somewhere else.
+            checkSource conn (flags <> ["--baseline", baseline]) "g = 1\nf =\n  [vectorStatement|\n    select   nickname :: text\n    from account\n  |]\n"
+                `shouldReturn` (ExitSuccess, "")
+            (changed, out) <- checkSource conn (flags <> ["--baseline", baseline]) "f = [vectorStatement|select nickname :: text from account where id > 0|]\n"
+            changed `shouldBe` ExitFailure 1
+            out `shouldSatisfy` ("column 1 (nickname)" `isInfixOf`)
+
+    itWithOuter "--files0-from checks every listed file in one run, so the baseline has them all" \conn ->
+        withSystemTempDirectory "hasql-check-files" \dir -> do
+            let a = dir </> "A.hs"
+                b = dir </> "B's.hs"
+                list = dir </> "files"
+                baseline = dir </> "baseline"
+            writeFile a "f = [vectorStatement|select nickname :: text from account|]\n"
+            writeFile b "g = [vectorStatement|select amount :: int4 from ledger|]\n"
+            writeFile list (a <> "\0" <> b <> "\0")
+            (code, _, _) <-
+                readCreateProcessWithExitCode
+                    (proc "hasql-check" ["--database", Text.unpack conn, "--nullability", "--types", "--files0-from", list, "--write-baseline", baseline])
+                    ""
+            code `shouldBe` ExitSuccess
+            contents <- readFile baseline
+            contents `shouldSatisfy` (" nullable nickname # " `isInfixOf`)
+            contents `shouldSatisfy` (" narrowing amount # " `isInfixOf`)

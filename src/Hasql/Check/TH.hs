@@ -22,6 +22,8 @@
 --   listed in the package's @extra-source-files@; GHCi notices it regardless.
 -- * @HASQL_CHECK_NULLABILITY@: when set, the warnings of @hasql-check
 --   --nullability@ become compiler warnings.
+-- * @HASQL_CHECK_TYPES@: when set, so do the warnings of @hasql-check
+--   --types@.
 --
 -- GHC runs a quote only when it compiles the module, so a module compiled
 -- before the database was set, or before the schema changed, is not checked
@@ -50,9 +52,13 @@ import Data.ByteString.Char8 qualified as ByteString.Char8
 import Data.Either (fromRight)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Maybe (isJust)
+import Data.Text (Text)
 import Data.Text qualified as Text
-import Hasql.Check (parseStmt, prepareStmt)
+import Data.Text.Encoding qualified as Text
+import Hasql.Check (parseStmt, prepareStmt, renderStmt)
+import Hasql.Check.Finding (Baseline, Finding, Rule (..), directivesAbove, readBaseline, settle, statementHash)
 import Hasql.Check.Nullability qualified as Nullability
+import Hasql.Check.Types qualified as Types
 import Hasql.TH (uncheckedSql, uncheckedSqlFile)
 import Hasql.TH qualified as TH
 import Language.Haskell.TH (Loc (..), Q, location, runIO)
@@ -112,6 +118,8 @@ data Config = Config
     { databaseUrl :: Maybe String
     , schemaFile :: Maybe FilePath
     , nullability :: Bool
+    , types :: Bool
+    , baseline :: Maybe FilePath
     }
 
 
@@ -121,6 +129,8 @@ readConfig =
         <$> nonEmpty "HASQL_CHECK_DATABASE_URL"
         <*> nonEmpty "HASQL_CHECK_SCHEMA_FILE"
         <*> (isJust <$> nonEmpty "HASQL_CHECK_NULLABILITY")
+        <*> (isJust <$> nonEmpty "HASQL_CHECK_TYPES")
+        <*> nonEmpty "HASQL_CHECK_BASELINE"
   where
     nonEmpty name =
         lookupEnv name >>= \case
@@ -134,7 +144,7 @@ readConfig =
 data Session = Session
     { connection :: Pqi.Connection
     , catalogue :: Maybe (ByteString.ByteString, Nullability.Catalogue)
-    -- ^ Loaded for nullability, keyed by the schema file's contents.
+    -- ^ Loaded for nullability and types, keyed by the schema file's contents.
     }
 
 
@@ -161,7 +171,9 @@ data Outcome
     = -- | The database cannot be reached; nothing was checked.
       Unavailable String
     | Failed String
-    | Checked [Nullability.Warning]
+    | -- | Checked, with the findings of the warnings asked for, and the
+      -- statement's hash for the baseline.
+      Checked [Finding] Text
 
 
 check :: Bool -> String -> Q ()
@@ -169,14 +181,25 @@ check rows sql = do
     config <- runIO readConfig
     forM_ config.schemaFile addDependentFile
     forM_ config.databaseUrl \url -> do
-        outcome <- runIO (checkStatement config url (rows && config.nullability) sql)
+        let findings = Findings{nullable = rows && config.nullability, narrowing = config.types}
+            checkedRules = [Nullable | findings.nullable] <> [Narrowing | findings.narrowing]
+        outcome <- runIO (checkStatement config url findings sql)
         case outcome of
             Unavailable why -> do
                 first <- runIO (atomicModifyIORef' reportedUnavailable (True,))
                 -- Not about this quote, so no location.
                 when (not first) (runIO (hPutStrLn stderr ("hasql-check: not checking statements: " <> why)))
             Failed err -> fail ("hasql-check: the statement does not prepare against HASQL_CHECK_DATABASE_URL:\n" <> err)
-            Checked warnings -> forM_ warnings (warn . Nullability.describe)
+            Checked found h
+                | null checkedRules -> pure ()
+                | otherwise -> do
+                    loc <- location
+                    fileLines <- runIO (readLines loc.loc_filename)
+                    known <- runIO (traverse readBaselineFile config.baseline)
+                    let directives = directivesAbove fileLines (fst loc.loc_start)
+                        (_, messages) = settle checkedRules directives (either (const Nothing) Just =<< known) h found
+                    forM_ (known >>= either Just (const Nothing)) \err -> warn ("cannot read HASQL_CHECK_BASELINE: " <> err)
+                    forM_ messages warn
 
 
 -- | A warning in GHC's format, so that tools reading GHC's output pick it up,
@@ -189,13 +212,32 @@ warn message = do
     runIO (hPutStrLn stderr (loc.loc_filename <> ":" <> show line <> ":" <> show column <> ": warning: hasql-check: " <> message))
 
 
-checkStatement :: Config -> String -> Bool -> String -> IO Outcome
-checkStatement config url withNullability sql = case parseStmt (Text.pack sql) of
+-- | A file's lines, or none if it cannot be read.
+readLines :: FilePath -> IO [Text]
+readLines path = either (const []) (Text.lines . Text.decodeUtf8Lenient) <$> (try (ByteString.readFile path) :: IO (Either SomeException ByteString.ByteString))
+
+
+readBaselineFile :: FilePath -> IO (Either String Baseline)
+readBaselineFile path =
+    (try (ByteString.readFile path) :: IO (Either SomeException ByteString.ByteString)) >>= \case
+        Left e -> pure (Left (show e))
+        Right bytes -> pure (readBaseline (Text.decodeUtf8Lenient bytes))
+
+
+-- | The warnings to look for, besides the statement preparing.
+data Findings = Findings
+    { nullable :: Bool
+    , narrowing :: Bool
+    }
+
+
+checkStatement :: Config -> String -> Findings -> String -> IO Outcome
+checkStatement config url findings sql = case parseStmt (Text.pack sql) of
     -- hasql-th reports the parse error itself.
-    Left _ -> pure (Checked [])
+    Left _ -> pure (Checked [] "")
     Right stmt -> modifyMVar session \current -> do
         fingerprint <-
-            if withNullability
+            if withCatalogue
                 then maybe (pure ByteString.empty) readFileOrEmpty config.schemaFile
                 else pure ByteString.empty
         attempt fingerprint stmt current >>= \case
@@ -204,6 +246,8 @@ checkStatement config url withNullability sql = case parseStmt (Text.pack sql) o
             (Nothing, Failed _) | Just _ <- current -> attempt fingerprint stmt Nothing
             result -> pure result
   where
+    withCatalogue = findings.nullable || findings.narrowing
+
     attempt fingerprint stmt current =
         open fingerprint current >>= \case
             Left why -> pure (Nothing, Unavailable why)
@@ -214,12 +258,15 @@ checkStatement config url withNullability sql = case parseStmt (Text.pack sql) o
                 case result of
                     Left err -> pure (kept, Failed err)
                     Right () -> case s.catalogue of
-                        Just (_, cat) | withNullability -> (kept,) . Checked <$> Nullability.check s.connection cat stmt
-                        _ -> pure (kept, Checked [])
+                        Just (_, cat) | withCatalogue -> do
+                            nullable <- if findings.nullable then Nullability.check s.connection cat stmt else pure []
+                            narrowing <- if findings.narrowing then Types.check s.connection cat stmt else pure []
+                            pure (kept, Checked (nullable <> narrowing) (statementHash (renderStmt stmt)))
+                        _ -> pure (kept, Checked [] "")
 
     open fingerprint = \case
         Just s
-            | not withNullability || fmap fst s.catalogue == Just fingerprint -> pure (Right s)
+            | not withCatalogue || fmap fst s.catalogue == Just fingerprint -> pure (Right s)
             | otherwise -> loadCatalogue fingerprint s.connection
         Nothing -> do
             conn <- Pqi.Ffi.adapter.connectdb (ByteString.Char8.pack url)
@@ -227,7 +274,7 @@ checkStatement config url withNullability sql = case parseStmt (Text.pack sql) o
             if status /= Pqi.ConnectionOk
                 then Left . maybe "cannot connect" (ByteString.Char8.unpack) <$> conn.errorMessage
                 else
-                    if withNullability
+                    if withCatalogue
                         then loadCatalogue fingerprint conn
                         else pure (Right (Session conn Nothing))
 
