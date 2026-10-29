@@ -14,6 +14,8 @@
 module Source (
     Quote (..),
     quoteAt,
+    Types (..),
+    typesOf,
     charIndex,
     ghcColumn,
 ) where
@@ -70,6 +72,28 @@ quoteAt source (startLine, startColumn) (endLine, endColumn) = do
     lastIndex c s = case [i | (i, x) <- zip [0 ..] s, x == c] of
         [] -> -1
         is -> last is
+
+
+-- | What the dictionaries in a quote's span say about its statement's types.
+data Types t
+    = -- | Not a statement of Hasql.Check.Inferred.TH.
+      NotInferred
+    | -- | Its types are only known where it is used, and may differ from one
+      -- use to the next.
+      Unresolved
+    | -- | Its parameter type, and its row type unless it returns no rows.
+      Resolved t (Maybe t)
+    deriving stock (Eq, Show)
+
+
+-- | The statement's types, given which types are concrete, and the types of
+-- the quote's Params and Row dictionaries.
+typesOf :: (t -> Bool) -> [t] -> [t] -> Types t
+typesOf concrete params rows = case (filter concrete params, filter concrete rows) of
+    _ | null params -> NotInferred
+    ([], _) -> Unresolved
+    (_, []) | not (null rows) -> Unresolved
+    (p : _, r) -> Resolved p (case r of x : _ -> Just x; [] -> Nothing)
 
 
 -- | The index in a line of the character at a GHC column.

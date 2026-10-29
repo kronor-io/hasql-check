@@ -21,8 +21,29 @@ cases =
     ]
 
 
+-- | The types of a quote, from its dictionaries' types; here a type is
+-- concrete unless it is "?".
+typeCases :: [(String, [String], [String], Types String)]
+typeCases =
+    [ ("concrete", ["Int64"], ["Text"], Resolved "Int64" (Just "Text"))
+    , ("no rows", ["Int64"], [], Resolved "Int64" Nothing)
+    , ("a polymorphic statement", ["?"], ["?"], Unresolved)
+    , ("a polymorphic row", ["Int64"], ["?"], Unresolved)
+    , ("not a statement of these quoters", [], [], NotInferred)
+    ]
+
+
 main :: IO ()
 main = do
+    typeFailures <-
+        traverse
+            ( \(name, params, rows, expected) -> do
+                let found = typesOf (/= "?") params rows
+                unless (found == expected) $
+                    putStrLn (name <> ": expected " <> show expected <> ", found " <> show found)
+                pure (found /= expected)
+            )
+            typeCases
     failures <-
         traverse
             ( \(name, source, start, end, expected) -> do
@@ -32,4 +53,4 @@ main = do
                 pure (found /= expected)
             )
             cases
-    if or failures then exitFailure else putStrLn (show (length cases) <> " passed")
+    if or (failures <> typeFailures) then exitFailure else putStrLn (show (length cases + length typeCases) <> " passed")

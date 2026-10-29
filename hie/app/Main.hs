@@ -23,6 +23,7 @@
 -- project is built with.
 module Main where
 
+import Control.Monad (unless)
 import Data.Char (ord)
 import Data.List (intercalate)
 import Data.Map qualified as Map
@@ -37,8 +38,10 @@ import GHC.Types.Name.Cache (initNameCache)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (srcSpanEndCol, srcSpanEndLine, srcSpanStartCol, srcSpanStartLine)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import Source (Quote (..), quoteAt)
+import Source (Quote (..), Types (..), quoteAt, typesOf)
 import System.Environment (getArgs)
+import System.Exit (exitFailure)
+import System.IO (hPutStrLn, stderr)
 import Text.Printf (printf)
 
 
@@ -49,7 +52,9 @@ main :: IO ()
 main = do
     files <- getArgs
     nc <- initNameCache 'z' []
-    mapM_ (dump nc) files
+    errors <- concat <$> mapM (dump nc) files
+    mapM_ (hPutStrLn stderr) errors
+    unless (null errors) exitFailure
   where
     dump nc path = do
         result <- readHieFile nc path
@@ -57,18 +62,27 @@ main = do
             toTy = convert . flip recoverFullType (hie_types hf)
             found = Map.fromListWith (flip (<>)) [(s, [t]) | (s, t) <- concatMap (collect toTy) (Map.elems (getAsts (hie_asts hf)))]
             source = lines (Text.unpack (Text.decodeUtf8Lenient (hie_hs_src hf)))
-        mapM_
-            ( \(s, here) ->
-                let params = [p | Con "Hasql.Check.Inferred" "Params" [p] <- here, ground p]
-                    rows = [r | Con "Hasql.Check.Inferred" "Row" [r] <- here, ground r]
-                    -- The enclosing declarations hold the same dictionaries,
-                    -- but only the quote's own span starts after "[quoter|".
-                    at = quoteAt source (srcSpanStartLine s, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s)
-                 in case (params, at) of
-                        (p : _, Just q) -> putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q p (safeHead rows))
-                        _ -> pure ()
-            )
-            (Map.toList found)
+        concat
+            <$> mapM
+                ( \(s, here) ->
+                    let params = [p | Con "Hasql.Check.Inferred" "Params" [p] <- here]
+                        rows = [r | Con "Hasql.Check.Inferred" "Row" [r] <- here]
+                        -- The enclosing declarations hold the same
+                        -- dictionaries, but only the quote's own span starts
+                        -- after "[quoter|".
+                        at = quoteAt source (srcSpanStartLine s, srcSpanStartCol s) (srcSpanEndLine s, srcSpanEndCol s)
+                        location q = hie_hs_file hf <> ":" <> show (srcSpanStartLine s) <> ":" <> show q.column
+                     in case (at, typesOf ground params rows) of
+                            (Just q, Resolved p r) -> [] <$ putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q p r)
+                            (Just q, Unresolved) -> pure [unresolved (location q)]
+                            _ -> pure []
+                )
+                (Map.toList found)
+
+    unresolved location =
+        location
+            <> ": the statement's types are not known where it is written, so it cannot be checked;"
+            <> " give its binding a concrete type, such as Statement Int64 Text"
 
     collect toTy node =
         -- The dictionaries the generated code passes are identifiers of the
@@ -78,9 +92,6 @@ main = do
                 [(nodeSpan node, toTy t) | info <- infos, t <- nodeType info]
                     <> [(nodeSpan node, toTy t) | info <- infos, (Right _, details) <- Map.toList (nodeIdentifiers info), Just t <- [identType details]]
          in here <> concatMap (collect toTy) (nodeChildren node)
-
-    safeHead (x : _) = Just x
-    safeHead [] = Nothing
 
 
 -- | One quote's line of output.

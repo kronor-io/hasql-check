@@ -22,6 +22,7 @@ module Hasql.Check.Annotate (
 ) where
 
 import Data.Data (Data, cast, gmapT)
+import Data.Foldable (toList)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.Maybe (fromMaybe)
@@ -94,7 +95,7 @@ results slot = \case
         c' <- clause c
         let s' = case (c, c') of
                 (Ast.SimpleSelectSelectClause (Ast.NormalSimpleSelect (Just (Ast.DistinctTargeting Nothing (Ast.TargetList old))) _ _ _ _ _ _), Ast.SimpleSelectSelectClause (Ast.NormalSimpleSelect (Just (Ast.DistinctTargeting Nothing (Ast.TargetList new))) _ _ _ _ _ _)) ->
-                    replaceEverywhere (zip (concatMap targetExpr old) (concatMap targetExpr new)) s
+                    distinctOrder (toList old) (toList new) <$> s
                 _ -> s
         pure (Ast.SelectNoParens w c' s' l f)
 
@@ -166,22 +167,56 @@ expands = \case
     star (Ast.Indirection els) = NonEmpty.last els == Ast.AllIndirectionEl
 
 
+-- | The ORDER BY of a SELECT DISTINCT whose columns were annotated, given
+-- them before and after.
+--
+-- A bare name in ORDER BY means the output column of that name if there is
+-- one, and annotating a column keeps its name, so such a name is left alone:
+-- it may even name another column than the expression it spells. Any other
+-- ORDER BY expression that is one of the columns selected becomes that
+-- column, annotated.
+distinctOrder :: [Ast.TargetEl] -> [Ast.TargetEl] -> Ast.SortClause -> Ast.SortClause
+distinctOrder old new (Ast.SortClause bys) = Ast.SortClause (fmap by bys)
+  where
+    replacements = zip (concatMap targetExpr old) (concatMap targetExpr new)
+    outputNames = concatMap outputName old
+    by = \case
+        Ast.UsingSortBy e op n -> Ast.UsingSortBy (sortExpr e) op n
+        Ast.AscDescSortBy e d n -> Ast.AscDescSortBy (sortExpr e) d n
+    sortExpr e
+        | Just name <- bareName e, name `elem` outputNames = e
+        | otherwise = fromMaybe e (lookup e replacements)
+
+
+-- | The name Postgres gives a result column, where it is a column's own.
+outputName :: Ast.TargetEl -> [Text]
+outputName = \case
+    Ast.AliasedExprTargetEl _ i -> [identText i]
+    Ast.ImplicitlyAliasedExprTargetEl _ i -> [identText i]
+    Ast.ExprTargetEl (Ast.CExprAExpr (Ast.ColumnrefCExpr (Ast.Columnref i Nothing))) -> [identText i]
+    Ast.ExprTargetEl (Ast.CExprAExpr (Ast.ColumnrefCExpr (Ast.Columnref _ (Just (Ast.Indirection els)))))
+        | Ast.AttrNameIndirectionEl i <- NonEmpty.last els -> [identText i]
+    _ -> []
+
+
+bareName :: Ast.AExpr -> Maybe Text
+bareName = \case
+    Ast.CExprAExpr (Ast.ColumnrefCExpr (Ast.Columnref i Nothing)) -> Just (identText i)
+    _ -> Nothing
+
+
+identText :: Ast.Ident -> Text
+identText = \case
+    Ast.QuotedIdent t -> t
+    Ast.UnquotedIdent t -> t
+
+
 targetExpr :: Ast.TargetEl -> [Ast.AExpr]
 targetExpr = \case
     Ast.AliasedExprTargetEl a _ -> [a]
     Ast.ImplicitlyAliasedExprTargetEl a _ -> [a]
     Ast.ExprTargetEl a -> [a]
     Ast.AsteriskTargetEl -> []
-
-
--- | Replace every occurrence of the given expressions.
-replaceEverywhere :: Data a => [(Ast.AExpr, Ast.AExpr)] -> a -> a
-replaceEverywhere replacements = go
-  where
-    go :: Data b => b -> b
-    go x = case cast x of
-        Just e | Just replacement <- lookup e replacements, Just r <- cast replacement -> r
-        _ -> gmapT go x
 
 
 numbered :: (Int -> a -> Maybe b) -> NonEmpty a -> Maybe (NonEmpty b)

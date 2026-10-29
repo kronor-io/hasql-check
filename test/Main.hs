@@ -549,9 +549,17 @@ piecesSpec = do
         sent "select t.*, (r).* from t" [] ["int8", "text"]
             `shouldBe` Right "SELECT t.*, (r).* FROM t"
 
-    it "orders SELECT DISTINCT by the annotated columns" $
+    it "leaves SELECT DISTINCT ordered by output column names, which annotating keeps" $
         sent "select distinct id, name from t order by id, name desc" [] ["int8", "text"]
-            `shouldBe` Right "SELECT DISTINCT (id) :: int8, (name) :: text FROM t ORDER BY (id) :: int8, (name) :: text DESC"
+            `shouldBe` Right "SELECT DISTINCT (id) :: int8, (name) :: text FROM t ORDER BY id, name DESC"
+
+    it "orders SELECT DISTINCT by an annotated column it names otherwise" $
+        sent "select distinct t.id, id + 1 as k from t order by t.id, id + 1" [] ["int8", "int8"]
+            `shouldBe` Right "SELECT DISTINCT (t.id) :: int8, (id + 1) :: int8 AS k FROM t ORDER BY (t.id) :: int8, (id + 1) :: int8"
+
+    it "leaves an ORDER BY name that an alias gives another column alone" $
+        sent "select distinct id as key, label as id from t order by id" [] ["int8", "text"]
+            `shouldBe` Right "SELECT DISTINCT (id) :: int8 AS key, (label) :: text AS id FROM t ORDER BY id"
 
     it "keeps text in a literal that looks like an annotation" $
         sent "select ' :: hasql_check_slot_c1'" [] ["text"]
@@ -595,6 +603,11 @@ runtimeSpec = do
     itWithOuter "sends a literal that looks like an annotation unchanged" \conn ->
         runStatement conn () [Inferred.singletonStatement|select ' :: hasql_check_slot_c1'|]
             `shouldReturn` (" :: hasql_check_slot_c1" :: Text)
+
+    -- Ordered by the column the alias "id" names, label, rather than v.id.
+    itWithOuter "keeps the order of SELECT DISTINCT by an alias" \conn ->
+        runStatement conn () [Inferred.singletonStatement|select distinct id as key, label as id from (values (2, 'a'), (1, 'b')) v (id, label) order by id limit 1|]
+            `shouldReturn` (2 :: Int64, "a" :: Text)
 
     itWithOuter "runs a statement without rows" \conn ->
         runStatement conn ("blue" :: Text, 2 :: Int64) [Inferred.resultlessStatement|insert into tag (label, id) values ($1, $2)|]
@@ -665,6 +678,10 @@ inferredSpec = do
 
     itWithOuter "accepts SELECT DISTINCT ordered by a column it annotates" \conn ->
         runInferred conn [] [inferredQuote "vectorStatement" "select distinct id from tag order by id" [] (Just [int64])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts SELECT DISTINCT ordered by a qualified column and an expression" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select distinct t.id, t.id + 1 from tag t order by t.id, t.id + 1" [] (Just [int64, int64])]
             `shouldReturn` (ExitSuccess, "")
 
     itWithOuter "rejects a Haskell type that sends more parameters than the statement takes" \conn -> do
