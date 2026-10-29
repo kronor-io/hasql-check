@@ -569,7 +569,7 @@ such as a Nix derivation, with only the `--inferred` step outside it.
 
 The plugin and `hasql-check-hie` use GHC's own library, and GHC's
 internals change with each release: build `hasql-check-ghc` with the GHC
-your project uses.
+your project uses. It supports GHC 9.12 and 9.14.
 
 ## Reference
 

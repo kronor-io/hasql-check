@@ -34,8 +34,8 @@ quoter ran, so this package gets them from GHC itself:
   derivation, with only the checking step outside it.
 
 Both use GHC's own library, whose internals change with each release, so this
-package supports one GHC series at a time — currently **GHC 9.12**. Build it
-with the GHC the checked project is built with.
+package supports the series it has been built against — currently **GHC 9.12
+and 9.14**. Build it with the GHC the checked project is built with.
 
 The full documentation, including everything the checks report, is in the
 [main README](https://github.com/kronor-io/hasql-check#readme).
