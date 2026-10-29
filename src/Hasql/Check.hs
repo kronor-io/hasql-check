@@ -32,6 +32,17 @@ parseStmt :: Text -> Either String Ast.PreparableStmt
 parseStmt sql = either (Left . Text.unpack) (Right . lowerAst) (Ast.parse quoterSettings sql)
 
 
+-- | A statement in plain SQL, as Postgres reads it, whatever syntax this
+-- build takes in hasql-th's quotes: for the quoters of
+-- "Hasql.Check.Inferred.TH", and the annotated statements that stand for
+-- theirs, which hasql-th's nullability markers may annotate.
+--
+-- Not lowered: Kronor's fork numbers the placeholders afresh as it lowers
+-- its parameter fields, which would turn a lone @$2@ into @$1@.
+parsePlainStmt :: Bool -> Text -> Either String Ast.PreparableStmt
+parsePlainStmt markers sql = either (Left . Text.unpack) Right (Ast.parse (Ast.nullabilityMarkers markers) sql)
+
+
 renderStmt :: Ast.PreparableStmt -> ByteString
 renderStmt = Text.encodeUtf8 . Ast.toText mempty
 

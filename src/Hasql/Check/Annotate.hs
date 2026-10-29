@@ -19,6 +19,7 @@ module Hasql.Check.Annotate (
     Slot (..),
     annotate,
     typename,
+    placeholder,
 ) where
 
 import Data.Data (Data, cast, gmapT)
@@ -41,6 +42,11 @@ data Slot = Param Int | Column Int
 typename :: Text -> Bool -> Ast.Typename
 typename name nullable =
     Ast.Typename False (Ast.GenericTypeSimpleTypename (Ast.GenericType (Ast.UnquotedIdent name) Nothing Nothing)) nullable Nothing
+
+
+-- | A made-up type with a plain name, to find in the rendered statement.
+placeholder :: Text -> Ast.Typename
+placeholder name = typename name False
 
 
 -- | The statement with each occurrence of a parameter, and each result

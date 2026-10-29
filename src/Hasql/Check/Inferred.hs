@@ -26,6 +26,8 @@ module Hasql.Check.Inferred (
     Row (..),
 
     -- * Statements
+    Template (..),
+    Wrapped (..),
     Piece (..),
     statement,
     resultless,
@@ -305,40 +307,81 @@ instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, 
     row = (,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
 
 
--- | A statement's text, as the quoter cut it: SQL, and the places its
--- annotations go.
+-- | A statement's text, as the quoter cut it.
+--
+-- Its result columns are cast in a projection around it,
+--
+-- > WITH <its own WITH list,> r (c1, c2) AS (<the statement>) SELECT c1 :: int8, c2 :: text FROM r
+--
+-- rather than where they are selected, so that the statement means what it
+-- did: a cast column is another expression to DISTINCT ON, ORDER BY and
+-- GROUP BY, and no longer the primary key other columns depend on. The
+-- statement's own WITH list goes first, since one with a data-modifying
+-- statement must stay at the top.
+data Template = Template
+    { whole :: [Piece]
+    -- ^ The statement, for one returning no rows.
+    , wrapped :: Maybe Wrapped
+    -- ^ Its parts, unless it cannot be put in a WITH list: a CALL.
+    }
+    deriving stock (Eq, Show, Lift)
+
+
+data Wrapped = Wrapped
+    { with :: Maybe [Piece]
+    -- ^ Its own WITH list, with the WITH.
+    , body :: [Piece]
+    -- ^ The rest of it.
+    , name :: Text
+    -- ^ A name for it that it does not use itself.
+    }
+    deriving stock (Eq, Show, Lift)
+
+
+-- | Some SQL, or the place of a parameter's annotation.
 data Piece
     = Sql Text
     | -- | The annotation of the nth parameter, counting from 1.
       ParamType Int
-    | -- | The annotation of the nth result column, counting from 1.
-      ColumnType Int
     deriving stock (Eq, Show, Lift)
 
 
--- | The statement's text, with the annotations for the given parameter and
--- result column types. Where the Haskell types have fewer columns than the
--- statement, the rest stay unannotated, and Postgres reports the mismatch.
-render :: [Text] -> [Text] -> [Piece] -> Text
-render paramTypes' columnTypes' = foldMap \case
-    Sql t -> t
-    ParamType n -> annotation paramTypes' n
-    ColumnType n -> annotation columnTypes' n
+-- | The statement's text, given the Postgres types of its parameters and
+-- result columns.
+render :: [Text] -> [Text] -> Template -> Text
+render paramTypes' columnTypes' t = case (columnTypes', t.wrapped) of
+    (_ : _, Just w) ->
+        mconcat
+            [ maybe "WITH " (\with -> fill with <> ", ") w.with
+            , w.name
+            , " ("
+            , Text.intercalate ", " columns
+            , ") AS ("
+            , fill w.body
+            , ") SELECT "
+            , Text.intercalate ", " (zipWith (\c ty -> c <> " :: " <> ty) columns columnTypes')
+            , " FROM "
+            , w.name
+            ]
+    _ -> fill t.whole
   where
-    annotation types n = case drop (n - 1) types of
-        t : _ | n >= 1 -> " :: " <> t
-        _ -> ""
+    columns = ["c" <> Text.pack (show i) | i <- [1 .. length columnTypes']]
+    fill = foldMap \case
+        Sql sql -> sql
+        ParamType n -> case drop (n - 1) paramTypes' of
+            ty : _ | n >= 1 -> " :: " <> ty
+            _ -> ""
 
 
 -- | A statement returning rows, given what to make of them.
-statement :: forall p r a. (Params p, Row r) => [Piece] -> (D.Row r -> D.Result a) -> Statement p a
-statement pieces result =
-    Statement.preparable (render (paramTypes @p) (columnTypes @r) pieces) params (result row)
+statement :: forall p r a. (Params p, Row r) => Template -> (D.Row r -> D.Result a) -> Statement p a
+statement template result =
+    Statement.preparable (render (paramTypes @p) (columnTypes @r) template) params (result row)
 
 
 -- | A statement returning no rows.
-resultless :: forall p. Params p => [Piece] -> Statement p ()
-resultless pieces = Statement.preparable (render (paramTypes @p) [] pieces) params D.noResult
+resultless :: forall p. Params p => Template -> Statement p ()
+resultless template = Statement.preparable (render (paramTypes @p) [] template) params D.noResult
 
 
 -- | Each Haskell type the checker knows the Postgres type of, by its
