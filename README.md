@@ -1,159 +1,412 @@
-## hasql-check
+# hasql-check
 
-`hasql-check` finds the [hasql-th](https://hackage.haskell.org/package/hasql-th)
-quasiquotes in Haskell source files and `PREPARE`s each statement against a
-live PostgreSQL database. A statement that names a missing table, column or
-function, or that no longer type-checks against the schema, fails here rather
-than at runtime.
+Check the SQL in your [hasql-th](https://hackage.haskell.org/package/hasql-th)
+quasiquotes against a real PostgreSQL database, before it reaches production.
 
-The SQL is parsed and rendered with `postgresql-syntax`, the library hasql-th
-itself uses, so what is prepared is what the splice would send.
+hasql-th checks that a statement parses. `hasql-check` asks Postgres whether it
+runs against your schema, and whether the types you annotated it with hold:
 
 ```
-hasql-check [--database CONNINFO] [--quoter NAME]... [--nullability] [--types]
-            [--baseline FILE] [--write-baseline FILE] [--fail-on-warnings]
-            [--files0-from FILE] [--list] FILES...
+$ hasql-check src/Shop/Customers.hs
+Error in src/Shop/Customers.hs:12:5
+ERROR:  column "emial" does not exist
+LINE 1: SELECT emial :: text FROM customer WHERE id = $1 :: int8
+               ^
+HINT:  Perhaps you meant to reference the column "customer.email".
 ```
 
-- `--database`: a libpq connection string or URI. Without it the database is
-  taken from `DATABASE_URL`, then `psql_conn_string`, then libpq's own
-  environment variables and defaults (`PGHOST`, `PGPORT`, `PGDATABASE`, ...).
-- `--quoter`: also check quasiquotes with this quoter name, for your own
-  quoters built on hasql-th. Repeatable.
-- `--nullability`: also warn about result columns annotated non-null that can
-  be null. See below.
-- `--types`: also warn about annotations that convert a value to a narrower
-  type. See below.
-- `--baseline`, `--write-baseline`, `--fail-on-warnings`: see "Suppressing
-  warnings" below.
-- `--files0-from`: also check the NUL-separated file names in a file, or on
-  stdin with `-`, as `find -print0` writes them. Prefer it to `xargs`, which
-  may split the files between several runs.
-- `--list`: print the quasiquotes that would be checked, without connecting.
+It runs as a command for CI, and as a drop-in replacement for `Hasql.TH`
+that reports the same errors while GHC compiles.
 
-The quoters checked by default are `singletonStatement`, `maybeStatement`,
-`vectorStatement`, `foldStatement`, `resultlessStatement` and
-`rowsAffectedStatement`, qualified or not. `uncheckedSql` is not checked: it is
-meant for scripts that `PREPARE` rejects.
+## Contents
 
-Statements are parsed the way upstream hasql-th parses them, nullability
-markers (`text?`) included. Building with the `kronor-syntax` flag also accepts
-the Haskell targets (`$f (a :: int8)`) and parameter fields (`$1.$field`) of
-Kronor's hasql-th fork; that needs Kronor's fork of `postgresql-syntax`.
+- [Installing](#installing)
+- [The example schema](#the-example-schema)
+- [Statements that do not match the schema](#statements-that-do-not-match-the-schema)
+- [Columns that can be null](#columns-that-can-be-null---nullability)
+- [Annotations that narrow a value](#annotations-that-narrow-a-value---types)
+- [Allowing a warning on purpose](#allowing-a-warning-on-purpose)
+- [Adopting it in an existing codebase](#adopting-it-in-an-existing-codebase)
+- [Running it in CI](#running-it-in-ci)
+- [Checking while you compile](#checking-while-you-compile)
+- [Reference](#reference)
+- [Limitations](#limitations)
 
-Quotes inside comments and string literals are ignored. Haskell syntax is not
-otherwise checked.
+## Installing
 
-For each failing statement the file, line and column of the quote are printed
-with PostgreSQL's error; the exit code is 1 if any statement failed.
+```
+git clone https://github.com/kronor-io/hasql-check
+cd hasql-check
+cabal install exe:hasql-check
+```
 
-### Tests
+It links against libpq, so install your platform's PostgreSQL client library
+first (`libpq-dev` on Debian and Ubuntu).
+
+## The example schema
+
+The examples below run against this schema:
+
+```sql
+create table customer (
+  id       int8 primary key,
+  email    text not null,
+  nickname text
+);
+
+create table orders (
+  id          int8 primary key,
+  customer_id int8 not null references customer,
+  total_cents int8 not null,
+  quantity    int2 not null
+);
+```
+
+Point `hasql-check` at the database with `--database`, or set
+`DATABASE_URL`:
+
+```
+export DATABASE_URL=postgres://localhost/shop
+```
+
+## Statements that do not match the schema
+
+`hasql-check` finds every hasql-th quote in the files you give it and
+`PREPARE`s its statement. Given this module:
+
+```haskell
+customerEmail :: Statement Int64 (Maybe Text)
+customerEmail =
+    [maybeStatement|
+        select emial :: text
+        from customer
+        where id = $1 :: int8
+    |]
+```
+
+```
+$ hasql-check src/Shop/Customers.hs
+Error in src/Shop/Customers.hs:12:5
+ERROR:  column "emial" does not exist
+LINE 1: SELECT emial :: text FROM customer WHERE id = $1 :: int8
+               ^
+HINT:  Perhaps you meant to reference the column "customer.email".
+```
+
+It exits 1 when any statement fails. A dropped column, a renamed function or a
+changed type in a migration shows up here, for every statement that uses it.
+
+To see which quotes it would check, without connecting:
+
+```
+$ hasql-check --list src/Shop/*.hs
+src/Shop/Customers.hs:12:5: maybeStatement
+src/Shop/Orders.hs:11:5: maybeStatement
+src/Shop/Orders.hs:19:5: resultlessStatement
+src/Shop/Profiles.hs:12:5: maybeStatement
+src/Shop/Profiles.hs:20:5: vectorStatement
+```
+
+## Columns that can be null: `--nullability`
+
+hasql-th decodes `nickname :: text` as a `Text`. If the column holds a `NULL`,
+decoding fails at runtime, and only for that row. `--nullability` asks the
+database:
+
+```haskell
+profile :: Statement Int64 (Maybe (Text, Text))
+profile =
+    [maybeStatement|
+        select email :: text, nickname :: text
+        from customer
+        where id = $1 :: int8
+    |]
+
+customerTotals :: Statement () (Vector (Text, Int64))
+customerTotals =
+    [vectorStatement|
+        select c.email :: text, o.total_cents :: int8
+        from customer c
+        left join orders o on o.customer_id = c.id
+    |]
+```
+
+```
+$ hasql-check --nullability src/Shop/Profiles.hs
+Warning in src/Shop/Profiles.hs:12:5
+  column 2 (nickname) is annotated non-null, but public.customer.nickname is nullable
+Warning in src/Shop/Profiles.hs:20:5
+  column 2 (total_cents) is annotated non-null, but comes from the nullable side of an outer join
+```
+
+`total_cents` is `NOT NULL` in its table, but a customer without orders gets a
+`NULL` from the left join. Any of these fixes the warning:
+
+```haskell
+select email :: text, nickname :: text?    -- decode it as Maybe Text
+...
+where id = $1 :: int8 and nickname is not null    -- or only return rows that have one
+```
+
+or, if every row really has one, a `NOT NULL` constraint on the column.
+
+Expressions (`count(*)`, `coalesce(...)`) and views are not checked, since
+Postgres does not say whether they can be null.
+
+## Annotations that narrow a value: `--types`
+
+An annotation is a cast, and `PREPARE` accepts a cast that loses information.
+`--types` warns about them:
+
+```haskell
+orderTotal :: Statement Int64 (Maybe Int32)
+orderTotal =
+    [maybeStatement|
+        select total_cents :: int4
+        from orders
+        where id = $1 :: int8
+    |]
+
+placeOrder :: Statement (Int64, Int64, Int64, Int32) ()
+placeOrder =
+    [resultlessStatement|
+        insert into orders (id, customer_id, total_cents, quantity)
+        values ($1 :: int8, $2 :: int8, $3 :: int8, $4 :: int4)
+    |]
+```
+
+```
+$ hasql-check --types src/Shop/Orders.hs
+Warning in src/Shop/Orders.hs:11:5
+  column 1 (total_cents) is annotated integer, but is a bigint: it may overflow
+Warning in src/Shop/Orders.hs:19:5
+  parameter $4 is annotated integer, but is assigned to a smallint column: it may overflow
+```
+
+Both work until a value does not fit. It warns about lossy integer and
+floating-point conversions, `numeric` to integers or floats, and
+`timestamptz` to `timestamp` or `date`. It checks result columns that read a
+table column, and parameters assigned in `INSERT ... VALUES` and
+`UPDATE ... SET`. It does not check expressions (`count(*) :: int4` is almost
+always deliberate), or parameters that are only compared (`where id = $1 ::
+int4` widens the column, it does not narrow the parameter).
+
+## Allowing a warning on purpose
+
+When a warning is wrong for your data, say so in a comment directly above the
+quote, naming the rule and the column (or `$n` for a parameter):
+
+```haskell
+profile =
+    -- Every customer picks a nickname at sign-up; the column is nullable
+    -- only for accounts migrated from the old shop.
+    -- hasql-check: allow nullable(nickname)
+    [maybeStatement|
+        select email :: text, nickname :: text
+        ...
+
+customerTotals =
+    -- hasql-check: allow nullable(total)
+    [vectorStatement|
+        select c.email :: text, o.total_cents :: int8
+        ...
+```
+
+The first directive silences the `nickname` warning. The second names a column
+the statement does not have, so it allows nothing, and that is reported too,
+which keeps typos and stale directives from piling up:
+
+```
+$ hasql-check --nullability src/Shop/Profiles.hs
+Warning in src/Shop/Profiles.hs:24:5
+  column 2 (total_cents) is annotated non-null, but comes from the nullable side of an outer join
+  allow nullable(total) suppresses nothing
+```
+
+The rules are `nullable` and `narrowing`. Several go on one line,
+`-- hasql-check: allow nullable(street, city), narrowing($4)`. Quote column
+names that have spaces: `nullable("display name")`. (A directive cannot go
+inside the SQL, because hasql-th does not accept SQL comments in a quote.)
+
+## Adopting it in an existing codebase
+
+An existing codebase will have warnings. To fail CI on new ones without
+fixing the old ones first, record them in a baseline. (These examples assume
+the `emial` typo above is fixed; a statement that does not prepare is always
+an error, baseline or not.)
+
+```
+$ hasql-check --nullability --types --write-baseline .hasql-check-baseline src/Shop/*.hs
+$ cat .hasql-check-baseline
+# hasql-check baseline: findings to ignore. Written by --write-baseline.
+09d21523a3c4b3f0 narrowing total_cents # src/Shop/Orders.hs:11:5
+07d99122eb9eeadd narrowing $4 # src/Shop/Orders.hs:19:5
+f44d2176be2dd654 nullable nickname # src/Shop/Profiles.hs:12:5
+9bdbaed7ce894852 nullable total_cents # src/Shop/Profiles.hs:20:5
+```
+
+Commit it, and check against it with `--fail-on-warnings`. The existing
+findings pass:
+
+```
+$ hasql-check --nullability --types --baseline .hasql-check-baseline --fail-on-warnings src/Shop/*.hs
+$ echo $?
+0
+```
+
+A new one fails:
+
+```haskell
+customerNickname :: Statement Int64 (Vector Text)
+customerNickname =
+    [vectorStatement|
+        select c.nickname :: text
+        from orders o join customer c on c.id = o.customer_id
+        where o.id = $1 :: int8
+    |]
+```
+
+```
+$ hasql-check --nullability --types --baseline .hasql-check-baseline --fail-on-warnings src/Shop/*.hs
+Warning in src/Shop/Orders.hs:26:5
+  column 1 (nickname) is annotated non-null, but public.customer.nickname is nullable
+$ echo $?
+1
+```
+
+An entry is keyed by a hash of the statement, not by its line, so moving a
+quote or reformatting it keeps the entry, and changing its SQL drops it.
+Rewrite the baseline with `--write-baseline` as you fix findings.
+
+## Running it in CI
+
+Run your migrations against a fresh database, then check every module. Give
+it the file list with `--files0-from` rather than `xargs`, which can split the
+files across several runs:
+
+```yaml
+jobs:
+  hasql-check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./migrate.sh   # however you apply your schema
+      - run: cabal install exe:hasql-check   # from a checkout of this repository
+      - run: |
+          find src -name '*.hs' -print0 \
+            | hasql-check --nullability --types \
+                --baseline .hasql-check-baseline --fail-on-warnings --files0-from -
+```
+
+If your statements read session settings with `current_setting(...)`, give
+them placeholder values (`PGOPTIONS="-c app.tenant_id=0"`). Postgres
+evaluates those calls while planning, and the nullability check plans every
+statement.
+
+## Checking while you compile
+
+`Hasql.Check.TH` exports hasql-th's quasiquoters, and checks each statement
+against a database as GHC compiles it. Swap the import:
+
+```haskell
+import Hasql.Check.TH    -- instead of: import Hasql.TH
+```
+
+and set `HASQL_CHECK_DATABASE_URL`. The error then appears at the quote, in
+GHC's output and in your editor:
+
+```
+$ HASQL_CHECK_DATABASE_URL=postgres://localhost/shop cabal build
+src/Shop/Customers.hs:12:21: error: [GHC-39584]
+    • hasql-check: the statement does not prepare against HASQL_CHECK_DATABASE_URL:
+ERROR:  column "emial" does not exist
+LINE 1: SELECT emial :: text FROM customer WHERE id = $1 :: int8
+               ^
+HINT:  Perhaps you meant to reference the column "customer.email".
+
+    • In the quasi-quotation:
+        [maybeStatement|
+        select emial :: text
+        from customer
+        where id = $1 :: int8
+    |]
+```
+
+Without the variable nothing is checked, so CI and release builds behave
+exactly as with `Hasql.TH`. If the database cannot be reached, the build
+prints one warning and carries on. Each check takes about a millisecond, over
+one connection shared by every quote.
+
+GHC only runs a quote when it recompiles the module, so a migration does not
+recheck modules that have not changed. Set `HASQL_CHECK_SCHEMA_FILE` to a file
+that changes with your schema, such as a migration plan, and every module
+with a checked quote depends on it. GHCi and ghciwatch notice the change on
+their own; for `cabal build`, also list the file in the package's
+`extra-source-files`. Keep running the command in CI, which checks everything
+regardless.
+
+## Reference
+
+### Options
+
+| Option | |
+|---|---|
+| `-d`, `--database CONNINFO` | libpq connection string or URI. Default: `DATABASE_URL`, then `psql_conn_string`, then libpq's `PG*` variables. |
+| `-n`, `--nullability` | Warn about non-null annotations on columns that can be null. |
+| `-t`, `--types` | Warn about annotations that narrow a value. |
+| `-b`, `--baseline FILE` | Ignore the findings listed in `FILE`. |
+| `--write-baseline FILE` | Write the current findings to `FILE`. |
+| `--fail-on-warnings` | Exit 1 if anything is warned about. |
+| `--files0-from FILE` | Also check the NUL-separated file names in `FILE`, or on stdin with `-`. |
+| `-q`, `--quoter NAME` | Also check quotes using this quoter, for your own quoters built on hasql-th. Repeatable. |
+| `-l`, `--list` | List the quotes that would be checked, without connecting. |
+
+It checks `singletonStatement`, `maybeStatement`, `vectorStatement`,
+`foldStatement`, `resultlessStatement` and `rowsAffectedStatement`, qualified
+or not. It skips quotes inside comments and string literals, and
+`uncheckedSql`, which is meant for scripts `PREPARE` cannot take.
+
+Exit codes: 0 when everything prepares (and, with `--fail-on-warnings`,
+nothing is warned about), 1 otherwise, 2 for bad arguments.
+
+### Environment variables for `Hasql.Check.TH`
+
+| Variable | |
+|---|---|
+| `HASQL_CHECK_DATABASE_URL` | The database to check against. Unset: nothing is checked. |
+| `HASQL_CHECK_NULLABILITY` | Set: also print the `--nullability` warnings. |
+| `HASQL_CHECK_TYPES` | Set: also print the `--types` warnings. |
+| `HASQL_CHECK_BASELINE` | A baseline file, as written by `--write-baseline`. |
+| `HASQL_CHECK_SCHEMA_FILE` | A file that changes with the schema, for recompilation. |
+
+The warnings go to stderr in GHC's format, rather than through GHC, so
+`-Werror` does not turn them into errors.
+
+## Limitations
+
+- The nullability and narrowing checks skip statements they cannot take
+  apart: `UNION`s, and `SELECT *`.
+- They need the plan, so a statement that reads a session setting the
+  connection lacks is only partly checked; see [Running it in CI](#running-it-in-ci).
+- The default build parses statements as upstream hasql-th does. Building with
+  the `kronor-syntax` flag instead accepts the Haskell targets
+  (`$f (a :: int8)`) and parameter fields (`$1.$field`) of Kronor's hasql-th
+  fork, and needs Kronor's fork of `postgresql-syntax`.
+
+## Development
 
 `cabal test` starts a throwaway PostgreSQL server, so `initdb`, `pg_ctl` and
 `psql` must be on `PATH`.
 
-### Nullability
-
-With `--nullability`, a result column annotated non-null (`name :: text`, no
-`?`) gets a warning when it can be null:
-
-- it reads a table column that is not `NOT NULL`, or
-- it comes from the nullable side of an outer join,
-
-unless the statement filters it with `IS NOT NULL`. Warnings do not change the
-exit code.
-
-Postgres does not say whether an expression or a view's column can be null, so
-those are not checked; neither are statements `hasql-check` cannot take apart,
-such as `UNION`s and `SELECT *`. The approach is the one sqlx takes: the
-statement is prepared again without the annotations, so that Postgres reports
-the table column each result column reads, and its plan, from
-`EXPLAIN (VERBOSE)` with a generic plan, shows the outer joins and the
-`IS NOT NULL` filters.
-
-Planning evaluates `current_setting(...)` calls, so a statement that reads a
-setting the session does not have cannot be planned, and only its table
-columns are checked. Give such settings placeholder values in the connection,
-for example `PGOPTIONS="-c app.tenant_id=0"`.
-
-### Narrowing annotations
-
-An annotation is a cast, and a cast between incompatible types already fails
-to prepare. A narrowing one does not: `bigint_column :: int4` prepares, and
-fails or loses data at runtime only for the values that do not fit. With
-`--types`, `hasql-check` warns about:
-
-- a result column that reads a table column of a wider type:
-  `amount :: int4` from a `bigint` column, `rate :: float4` from a
-  `double precision` one, `at :: date` from a `timestamptz` one;
-- a parameter assigned to a column of a narrower type, in `INSERT ... VALUES`
-  or `UPDATE ... SET`: `$1 :: int8` into an `integer` column.
-
-Expressions are not checked, since converting one is almost always the point
-(`count(*) :: int4`), nor are parameters that are only compared, since a
-comparison widens the column rather than narrowing the parameter. Domains are
-looked through to their base types. The statement is prepared again without
-those annotations, so that Postgres reports the types underneath them.
-
-### Suppressing warnings
-
-Most warnings are best fixed: a `?` on the annotation, an `IS NOT NULL` in
-the statement, a `NOT NULL` constraint on the column, a wider annotation. For
-a deliberate case, a directive in the comment lines directly above the line
-the quote starts on suppresses findings by rule and by column name, or `$n`
-for a parameter:
-
-```haskell
--- hasql-check: allow nullable(street, city), narrowing($4)
-[singletonStatement| ... |]
-```
-
-A directive that suppresses nothing is itself warned about, so stale ones do
-not linger. (SQL comments cannot be used: hasql-th does not accept them in a
-quote.)
-
-To start failing CI on new warnings without first fixing the existing ones,
-write them to a baseline and check against it:
-
-```
-hasql-check --nullability --types --write-baseline .hasql-check-baseline ...
-hasql-check --nullability --types --baseline .hasql-check-baseline --fail-on-warnings ...
-```
-
-A baseline entry is a hash of the statement as Postgres receives it, the rule
-and the column, so moving a quote or changing its layout keeps it, and
-changing the statement drops it. `--fail-on-warnings` exits 1 if anything is
-left to warn about.
-
-### Checking while compiling
-
-`Hasql.Check.TH` exports hasql-th's quasiquoters, unchanged except that they
-check their statements against a database as they compile. Import it instead
-of `Hasql.TH`:
-
-```haskell
-import Hasql.Check.TH (maybeStatement)
-```
-
-Nothing is checked unless `HASQL_CHECK_DATABASE_URL` is set, so builds without
-a database behave exactly as with `Hasql.TH`. When it is set, a statement that
-does not prepare is a compile error at its quote. If the database cannot be
-reached, the build warns once and goes on.
-
-- `HASQL_CHECK_DATABASE_URL`: a libpq connection string or URI.
-- `HASQL_CHECK_SCHEMA_FILE`: a file that changes whenever the schema does,
-  such as a migration plan. Modules with checked quotes depend on it, so a
-  schema change rechecks them. Cabal only notices it if it is also in the
-  package's `extra-source-files`; GHCi notices it regardless.
-- `HASQL_CHECK_BASELINE`: a baseline file, as above.
-- `HASQL_CHECK_NULLABILITY`, `HASQL_CHECK_TYPES`: when set, the
-  `--nullability` and `--types` warnings are reported too, in GHC's format on
-  stderr, so that `-Werror` does not fail the build on them.
-
-GHC runs a quote only when it compiles the module, so a module compiled
-before the database was set, or before the schema changed, is not checked
-until it recompiles. Keep running the `hasql-check` executable in CI.
-
-One connection serves every quote the compiler runs; a dropped connection is
-replaced.
-
+The nullability check follows [sqlx](https://github.com/launchbadge/sqlx)'s:
+the statement is prepared again without its annotations so that Postgres
+reports what each column reads, and its `EXPLAIN` plan shows the outer joins
+and `IS NOT NULL` filters.

@@ -31,7 +31,7 @@ module Hasql.Check.Nullability (
     Catalogue,
     baseType,
     prepareSession,
-    Annotation,
+    Annotation (..),
     strip,
     query,
     check,
@@ -45,6 +45,7 @@ import Data.Aeson qualified as Aeson
 import Data.Bifunctor (second)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as ByteString.Char8
+import Data.Data (Data, cast, gmapT)
 import Data.Foldable (toList)
 import Data.Int (Int32)
 import Data.Map.Strict (Map)
@@ -142,8 +143,12 @@ loadCatalogue conn = do
 -- * Stripping the result casts
 
 
--- | The nullability of a result column's outermost cast, if it has one.
-type Annotation = Maybe Bool
+-- | A result column's outermost cast, if it has one: its nullability, and the
+-- expression with and without it.
+data Annotation = Annotation
+    { nullable :: Maybe Bool
+    , removed :: Maybe (Ast.AExpr, Ast.AExpr)
+    }
 
 
 typenameNullable :: Ast.Typename -> Bool
@@ -152,8 +157,8 @@ typenameNullable (Ast.Typename _ _ nullable dims) = maybe nullable snd dims
 
 stripExpr :: Ast.AExpr -> (Annotation, Ast.AExpr)
 stripExpr = \case
-    Ast.TypecastAExpr e t -> (Just (typenameNullable t), e)
-    e -> (Nothing, e)
+    whole@(Ast.TypecastAExpr e t) -> (Annotation (Just (typenameNullable t)) (Just (whole, e)), e)
+    e -> (Annotation Nothing Nothing, e)
 
 
 stripTargetEl :: Ast.TargetEl -> Maybe (Annotation, Ast.TargetEl)
@@ -227,8 +232,31 @@ stripReturning = \case
 
 
 -- | The annotation of every result column, and the statement without them.
+--
+-- An annotated expression is replaced wherever it occurs, not only in the
+-- result columns: @select distinct amount :: int4 ... order by amount :: int4@
+-- would otherwise order by an expression it no longer selects, and fail to
+-- prepare.
 strip :: Ast.PreparableStmt -> Maybe ([Annotation], Ast.PreparableStmt)
-strip = \case
+strip stmt = do
+    (annotations, stripped) <- stripResults stmt
+    let replacements = [r | Annotation{removed = Just r} <- annotations]
+    pure (annotations, replaceEverywhere replacements stripped)
+
+
+-- | Replace every occurrence of the given expressions.
+replaceEverywhere :: Data a => [(Ast.AExpr, Ast.AExpr)] -> a -> a
+replaceEverywhere [] = id
+replaceEverywhere replacements = go
+  where
+    go :: Data b => b -> b
+    go x = case cast x of
+        Just e | Just replacement <- lookup e replacements, Just r <- cast replacement -> r
+        _ -> gmapT go x
+
+
+stripResults :: Ast.PreparableStmt -> Maybe ([Annotation], Ast.PreparableStmt)
+stripResults = \case
     Ast.SelectPreparableStmt (Ast.NoParensSelectStmt s) -> second (Ast.SelectPreparableStmt . Ast.NoParensSelectStmt) <$> stripNoParens s
     Ast.SelectPreparableStmt (Ast.WithParensSelectStmt s) -> second (Ast.SelectPreparableStmt . Ast.WithParensSelectStmt) <$> stripWithParens s
     Ast.InsertPreparableStmt (Ast.InsertStmt a b c d r) -> second (Ast.InsertPreparableStmt . Ast.InsertStmt a b c d) <$> stripReturning r
@@ -241,7 +269,8 @@ strip = \case
 
 
 data Plan = Plan
-    { output :: [Text]
+    { nodeType :: Text
+    , output :: [Text]
     , joinType :: Maybe Text
     , parentRelationship :: Maybe Text
     , filters :: [Text]
@@ -255,7 +284,8 @@ instance Aeson.FromJSON Plan where
     parseJSON = Aeson.withObject "Plan" \o -> do
         filters <- catMaybes <$> traverse (o .:?) ["Filter", "Index Cond", "Recheck Cond"]
         Plan
-            <$> (fromMaybe [] <$> o .:? "Output")
+            <$> (fromMaybe "" <$> o .:? "Node Type")
+            <*> (fromMaybe [] <$> o .:? "Output")
             <*> o .:? "Join Type"
             <*> o .:? "Parent Relationship"
             <*> pure filters
@@ -275,7 +305,9 @@ data PlanNullability = PlanNullability
     -- ^ Output by a node on the nullable side of an outer join: the inner side
     -- of a left join, the outer side of a right join, both sides of a full one.
     , filteredNotNull :: Set Text
-    -- ^ Filtered with @IS NOT NULL@ by a node that is not on such a side.
+    -- ^ Filtered with @IS NOT NULL@ by a node whose condition holds for every
+    -- row: not one on such a side, under one branch of a @BitmapOr@, or in a
+    -- subplan, whose rows are not the statement's.
     }
 
 
@@ -288,14 +320,20 @@ instance Monoid PlanNullability where
 
 
 planNullability :: Plan -> PlanNullability
-planNullability = go False
+planNullability = go False True
   where
-    go nullable plan =
-        ( if nullable
-            then PlanNullability (Set.fromList plan.output) Set.empty
-            else PlanNullability Set.empty (Set.fromList (concatMap notNullOperands plan.filters))
-        )
-            <> foldMap (\child -> go (nullable || nullableChild plan child) child) plan.plans
+    go nullable guarding plan =
+        PlanNullability
+            (if nullable then Set.fromList plan.output else Set.empty)
+            (if guarding && not nullable then Set.fromList (concatMap notNullOperands plan.filters) else Set.empty)
+            <> foldMap
+                ( \child ->
+                    go
+                        (nullable || nullableChild plan child)
+                        (guarding && plan.nodeType /= "BitmapOr" && child.parentRelationship `notElem` [Just "SubPlan", Just "InitPlan"])
+                        child
+                )
+                plan.plans
     nullableChild parent child = case parent.joinType of
         Just "Left" -> child.parentRelationship == Just "Inner"
         Just "Right" -> child.parentRelationship == Just "Outer"
@@ -428,16 +466,24 @@ warningsFor conn catalogue stmt = case strip stmt of
                                 Just (outputs, nullability)
                                     | Just out <- lookup i (zip [0 ..] outputs) ->
                                         ( out `mentionedIn` nullability.outerJoined
-                                        , out `mentionedIn` nullability.filteredNotNull
+                                        , guardsApply && out `mentionedIn` nullability.filteredNotNull
                                         )
                                 _ -> (False, False)
                             warn r = [Warning (fromIntegral i + 1) name r]
                         pure case (annotation, planned, Map.lookup (table, tableColumn) catalogue.columns) of
-                            (Just False, (_, True), _) -> []
-                            (Just False, (True, _), _) -> warn "comes from the nullable side of an outer join"
-                            (Just False, _, Just col)
+                            (Annotation{nullable = Just False}, (_, True), _) -> []
+                            (Annotation{nullable = Just False}, (True, _), _) -> warn "comes from the nullable side of an outer join"
+                            (Annotation{nullable = Just False}, _, Just col)
                                 | not col.fromView && not col.notNull -> warn (col.qualifiedName <> " is nullable")
                             _ -> []
+
+    -- A filter in the plan is about the rows read. Those are the rows a SELECT
+    -- returns, and those a DELETE returns, but an UPDATE returns the rows it
+    -- wrote, and an INSERT the rows it made.
+    guardsApply = case stmt of
+        Ast.SelectPreparableStmt _ -> True
+        Ast.DeletePreparableStmt _ -> True
+        _ -> False
 
     -- The top node's outputs, one per result column, and what the plan says
     -- about them. Nothing if EXPLAIN fails.

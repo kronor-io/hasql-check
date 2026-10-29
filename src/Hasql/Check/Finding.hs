@@ -107,7 +107,9 @@ parseDirective t = case Text.stripPrefix "allow" t of
         (name, args)
             | Just inner <- Text.stripPrefix "(" args >>= Text.stripSuffix ")"
             , Just r <- lookup (Text.strip name) [(ruleName r', r') | r' <- [minBound .. maxBound]] ->
-                ([(r, Text.strip s) | s <- Text.splitOn "," inner, not (Text.all isSpace s)], [])
+                case subjects inner of
+                    Right names -> ([(r, subj) | subj <- names], [])
+                    Left err -> ([], ["directive not understood: " <> Text.unpack e <> ": " <> err])
         _ -> ([], ["directive not understood: " <> Text.unpack e])
     -- Split on the commas between entries, not those inside them.
     splitTopLevel = go 0 ""
@@ -164,16 +166,21 @@ readBaseline :: Text -> Either String Baseline
 readBaseline = fmap (Baseline . Set.fromList) . traverse entry . filter (not . blank) . Text.lines
   where
     blank l = Text.null (Text.strip l) || "#" `Text.isPrefixOf` Text.stripStart l
-    entry l = case Text.words (fst (Text.breakOn "#" l)) of
-        [h, r, s] | Just r' <- lookup r [(ruleName x, x) | x <- [minBound .. maxBound]] -> Right (h, r', s)
-        _ -> Left ("Malformed baseline line: " <> Text.unpack l)
+    entry l = either (\err -> Left (concat ["Malformed baseline line: ", Text.unpack l, ": ", err])) Right do
+        let (h, afterHash) = Text.break isSpace (Text.stripStart l)
+            (r, afterRule) = Text.break isSpace (Text.stripStart afterHash)
+        r' <- maybe (Left "unknown rule") Right (lookup r [(ruleName x, x) | x <- [minBound .. maxBound]])
+        (subj, rest) <- word (Text.stripStart afterRule)
+        if Text.null (Text.strip rest) || "#" `Text.isPrefixOf` Text.stripStart rest
+            then Right (h, r', subj)
+            else Left "trailing text"
 
 
 renderBaseline :: [BaselineEntry] -> Text
 renderBaseline entries =
     Text.unlines
         ( "# hasql-check baseline: findings to ignore. Written by --write-baseline."
-            : [ Text.unwords [e.hash, ruleName e.entryRule, e.entrySubject, "#", e.origin]
+            : [ Text.unwords [e.hash, ruleName e.entryRule, quote e.entrySubject, "#", e.origin]
               | e <- sortOn (\e -> (e.origin, e.hash, e.entryRule, e.entrySubject)) entries
               ]
         )
@@ -202,3 +209,44 @@ settle checked (allowances, malformed) baseline h findings =
     )
   where
     (kept, unused) = applyDirectives checked allowances findings
+
+
+-- * Names
+
+
+-- | A column name as written in a baseline or a directive: bare, or in double
+-- quotes when it has spaces or punctuation, with @\\@ and @\"@ escapes.
+quote :: Text -> Text
+quote name
+    | not (Text.null name) && Text.all plain name = name
+    | otherwise = Text.concat ["\"", Text.concatMap escape name, "\""]
+  where
+    plain c = not (isSpace c) && c `notElem` ("#\"\\,()" :: String)
+    escape c = if c == '"' || c == '\\' then Text.pack ['\\', c] else Text.singleton c
+
+
+-- | A name, bare or quoted, at the start of the text, and the text after it.
+word :: Text -> Either String (Text, Text)
+word t = case Text.uncons t of
+    Just ('"', rest) -> go "" rest
+    _ ->
+        let (bare, rest) = Text.break (\c -> isSpace c || c == ',') t
+         in if Text.null bare then Left "missing name" else Right (bare, rest)
+  where
+    go acc s = case Text.uncons s of
+        Nothing -> Left "unterminated quote"
+        Just ('"', rest) -> Right (acc, rest)
+        Just ('\\', rest) | Just (c, rest') <- Text.uncons rest -> go (Text.snoc acc c) rest'
+        Just (c, rest) -> go (Text.snoc acc c) rest
+
+
+-- | Comma-separated names, bare or quoted.
+subjects :: Text -> Either String [Text]
+subjects t
+    | Text.null (Text.strip t) = Right []
+    | otherwise = do
+        (name, rest) <- word (Text.stripStart t)
+        case Text.uncons (Text.stripStart rest) of
+            Nothing -> Right [name]
+            Just (',', more) -> (name :) <$> subjects more
+            Just _ -> Left "expected a comma"

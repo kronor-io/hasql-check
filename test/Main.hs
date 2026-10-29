@@ -116,7 +116,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents)"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents)"]
                 action conn
 
 
@@ -273,6 +273,23 @@ nullabilitySpec = do
     itWithOuter "lets IS NOT NULL clear the nullable side of a join" \conn ->
         nullability conn "select n.body :: text from account a left join note n on n.account_id = a.id where n.body is not null" `shouldReturn` (ExitSuccess, "")
 
+    itWithOuter "does not let an UPDATE's filter on the old row clear RETURNING's new one" \conn -> do
+        (_, out) <- nullability conn "update account set nickname = NULL where nickname is not null returning nickname :: text"
+        out `shouldSatisfy` ("public.account.nickname is nullable" `isInfixOf`)
+
+    itWithOuter "lets a DELETE's filter clear RETURNING, which returns the rows it read" \conn ->
+        nullability conn "delete from account where nickname is not null returning nickname :: text" `shouldReturn` (ExitSuccess, "")
+
+    -- With sequential scans off, Postgres answers the OR with a BitmapOr of
+    -- two index scans, one of which has the IS NOT NULL as its condition.
+    itWithOuter "does not take one branch of a BitmapOr for a guarantee" \conn -> do
+        (_, out) <-
+            runOn
+                [("PGOPTIONS", "-c enable_seqscan=off")]
+                ["--database", Text.unpack conn, "--nullability"]
+                "f = [vectorStatement|select nickname :: text from account where nickname is not null or id = $1 :: int4|]\n"
+        out `shouldSatisfy` ("public.account.nickname is nullable" `isInfixOf`)
+
     itWithOuter "checks a statement with parameters" \conn -> do
         (_, out) <- nullability conn "select nickname :: text from account where id = $1 :: int4"
         out `shouldSatisfy` ("public.account.nickname is nullable" `isInfixOf`)
@@ -314,6 +331,13 @@ thSpec = do
         setEnv "HASQL_CHECK_DATABASE_URL" (Text.unpack conn)
         result <- quote Checked.resultlessStatement "delete from nowhere"
         result `shouldSatisfy` isLeft
+
+    -- Run after the tests above have left a connection open to the test
+    -- database: a broken statement fails there, but not when the database
+    -- named cannot be reached.
+    it "follows a change of database" do
+        setEnv "HASQL_CHECK_DATABASE_URL" "host=/nonexistent"
+        quote Checked.vectorStatement "select nope :: text from account" `shouldReturn` Right ()
 
 
 -- | Run with --types on one quote; return the exit code and output.
@@ -368,6 +392,18 @@ typesSpec = do
         (_, out) <- types conn "resultlessStatement" "update ledger set small = $1 :: int4 where amount = $2 :: int4"
         out `shouldSatisfy` ("parameter $1 is annotated integer, but is assigned to a smallint column" `isInfixOf`)
         out `shouldNotSatisfy` ("parameter $2" `isInfixOf`)
+
+    itWithOuter "checks every column a parameter is assigned to" \conn -> do
+        (_, out) <- types conn "resultlessStatement" "update ledger set amount = $1 :: int8, small = $1 :: int8 where id = $2 :: int8"
+        out `shouldSatisfy` ("parameter $1 is annotated bigint, but is assigned to a smallint column" `isInfixOf`)
+
+    itWithOuter "removes an annotation from ORDER BY too, so DISTINCT still prepares" \conn -> do
+        (_, out) <- types conn "vectorStatement" "select distinct amount :: int4 from ledger order by amount :: int4"
+        out `shouldSatisfy` ("column 1 (amount) is annotated integer, but is a bigint" `isInfixOf`)
+
+    itWithOuter "removes an annotation from GROUP BY too" \conn -> do
+        (_, out) <- types conn "vectorStatement" "select amount :: int4 from ledger group by amount :: int4"
+        out `shouldSatisfy` ("column 1 (amount) is annotated integer, but is a bigint" `isInfixOf`)
 
     itWithOuter "checks RETURNING along with the assignments" \conn -> do
         (_, out) <- types conn "singletonStatement" "insert into account (id, name) values ($1 :: int8, $2 :: text) returning id :: int2"
@@ -452,3 +488,14 @@ suppressionSpec = do
             contents <- readFile baseline
             contents `shouldSatisfy` (" nullable nickname # " `isInfixOf`)
             contents `shouldSatisfy` (" narrowing amount # " `isInfixOf`)
+
+    itWithOuter "a baseline and a directive handle a quoted column name" \conn ->
+        withSystemTempDirectory "hasql-check-quoted" \dir -> do
+            let baseline = dir </> "baseline"
+                source = "f = [vectorStatement|select nickname :: text as \"display name\" from account|]\n"
+            _ <- checkSource conn ["--nullability", "--write-baseline", baseline] source
+            contents <- readFile baseline
+            contents `shouldSatisfy` (" nullable \"display name\" # " `isInfixOf`)
+            checkSource conn ["--nullability", "--fail-on-warnings", "--baseline", baseline] source `shouldReturn` (ExitSuccess, "")
+            checkSource conn ["--nullability", "--fail-on-warnings"] ("-- hasql-check: allow nullable(\"display name\")\n" <> source)
+                `shouldReturn` (ExitSuccess, "")

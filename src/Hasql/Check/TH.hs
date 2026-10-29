@@ -142,7 +142,10 @@ readConfig =
 
 
 data Session = Session
-    { connection :: Pqi.Connection
+    { url :: String
+    -- ^ What the connection was made to. A long GHCi session can outlive a
+    -- change of HASQL_CHECK_DATABASE_URL, and must follow it.
+    , connection :: Pqi.Connection
     , catalogue :: Maybe (ByteString.ByteString, Nullability.Catalogue)
     -- ^ Loaded for nullability and types, keyed by the schema file's contents.
     }
@@ -266,6 +269,9 @@ checkStatement config url findings sql = case parseStmt (Text.pack sql) of
 
     open fingerprint = \case
         Just s
+            | s.url /= url -> do
+                s.connection.finish
+                open fingerprint Nothing
             | not withCatalogue || fmap fst s.catalogue == Just fingerprint -> pure (Right s)
             | otherwise -> loadCatalogue fingerprint s.connection
         Nothing -> do
@@ -276,11 +282,11 @@ checkStatement config url findings sql = case parseStmt (Text.pack sql) of
                 else
                     if withCatalogue
                         then loadCatalogue fingerprint conn
-                        else pure (Right (Session conn Nothing))
+                        else pure (Right (Session url conn Nothing))
 
     loadCatalogue fingerprint conn =
         Nullability.prepareSession conn >>= \case
             Left err -> pure (Left err)
-            Right cat -> pure (Right (Session conn (Just (fingerprint, cat))))
+            Right cat -> pure (Right (Session url conn (Just (fingerprint, cat))))
 
     readFileOrEmpty path = fromRight ByteString.empty <$> (try (ByteString.readFile path) :: IO (Either SomeException ByteString.ByteString))

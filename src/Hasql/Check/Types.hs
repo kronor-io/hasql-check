@@ -32,10 +32,11 @@ import Control.Monad (forM)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.Traversable (mapAccumL)
 import Data.Word (Word32)
 import Hasql.Check (renderStmt)
 import Hasql.Check.Finding (Finding (..), Rule (..))
-import Hasql.Check.Nullability (Catalogue, baseType, query, strip)
+import Hasql.Check.Nullability (Annotation (..), Catalogue, baseType, query, strip)
 import PostgresqlSyntax qualified as Ast
 import Pqi qualified
 import Prelude
@@ -44,45 +45,49 @@ import Prelude
 -- | The findings for a statement that prepares.
 check :: Pqi.Connection -> Catalogue -> Ast.PreparableStmt -> IO [Finding]
 check conn catalogue stmt
-    | null assigned && null annotations = pure []
+    | null (fst (stripAssigned 0 stmt)) && maybe True (null . fst) (strip stmt) = pure []
     | otherwise =
-        ( describe "hasql_check_types_annotated" stmt >>= \case
+        ( describe "hasql_check_types_annotated" stmt Nothing >>= \case
             Nothing -> pure []
-            Just annotated ->
-                describe "hasql_check_types_stripped" stripped >>= \case
+            Just annotated -> do
+                -- Every assigned occurrence gets a placeholder of its own, so
+                -- that a parameter assigned to two columns is checked against
+                -- both; the statement's own parameters keep their annotated
+                -- types, declared, since some may now appear nowhere.
+                let (assigned, withoutParams) = stripAssigned (length annotated.params) stmt
+                    (annotations, stripped) = fromMaybe ([], withoutParams) (strip withoutParams)
+                    declared = annotated.params <> map (const 0) assigned
+                describe "hasql_check_types_stripped" stripped (Just declared) >>= \case
                     Nothing -> pure []
-                    Just found -> pure (results annotated found <> params annotated found)
+                    Just found -> pure (results annotations annotated found <> params assigned annotated found)
         )
             `finally` mapM_ (\name -> query conn ("DEALLOCATE " <> name)) ["hasql_check_types_annotated", "hasql_check_types_stripped"]
   where
-    (assigned, withoutParams) = stripAssigned stmt
-    (annotations, stripped) = fromMaybe ([], withoutParams) (strip withoutParams)
-
-    results annotated found
+    results annotations annotated found
         | length annotations /= length annotated.columns || length found.columns /= length annotated.columns = []
         | otherwise =
             catMaybes
                 [ narrowing from to <&&> \(fromName, toName, consequence) ->
                     Finding Narrowing (Text.pack name) ("column " <> show i <> " (" <> name <> ") is annotated " <> toName <> ", but is " <> article fromName <> ": " <> consequence)
-                | (i, Just _, (name, to, _), (_, from, fromTable)) <- zip4 [1 :: Int ..] annotations annotated.columns found.columns
+                | (i, Annotation{nullable = Just _}, (name, to, _), (_, from, fromTable)) <- zip4 [1 :: Int ..] annotations annotated.columns found.columns
                 , fromTable
                 ]
 
-    params annotated found =
+    params assigned annotated found =
         catMaybes
             [ narrowing from to <&&> \(fromName, toName, consequence) ->
                 Finding Narrowing (Text.pack ("$" <> show n)) ("parameter $" <> show n <> " is annotated " <> fromName <> ", but is assigned to " <> article toName <> " column: " <> consequence)
-            | n <- assigned
+            | (n, placeholder) <- assigned
             , Just from <- [lookupParam n annotated]
-            , Just to <- [lookupParam n found]
+            , Just to <- [lookupParam placeholder found]
             ]
 
     lookupParam n d = lookup n (zip [1 ..] d.params)
 
     narrowing from to = lossy (baseType catalogue from) (baseType catalogue to)
 
-    describe name s = do
-        prepared <- conn.prepare name (renderStmt s) Nothing
+    describe name s types = do
+        prepared <- conn.prepare name (renderStmt s) types
         status <- maybe (pure Pqi.FatalError) (.resultStatus) prepared
         if status /= Pqi.CommandOk
             then pure Nothing
@@ -125,10 +130,11 @@ article name = "a " <> name
 -- * Stripping assigned parameters
 
 
--- | The statement with the annotations removed from the parameters it assigns
--- to columns, and their numbers.
-stripAssigned :: Ast.PreparableStmt -> ([Int], Ast.PreparableStmt)
-stripAssigned = \case
+-- | The statement with each parameter it assigns to a column replaced by a
+-- new, unannotated placeholder numbered from after the given count, and the
+-- pairs of parameter and placeholder.
+stripAssigned :: Int -> Ast.PreparableStmt -> ([(Int, Int)], Ast.PreparableStmt)
+stripAssigned count = \case
     Ast.InsertPreparableStmt
         ( Ast.InsertStmt
                 w
@@ -137,19 +143,21 @@ stripAssigned = \case
                 c
                 r
             ) ->
-            let (ns, rows') = traverse (\(Ast.ExprList es) -> Ast.ExprList <$> traverse param es) rows
-             in (ns, Ast.InsertPreparableStmt (Ast.InsertStmt w t (Ast.SelectInsertRest cols o (Ast.NoParensSelectStmt (Ast.SelectNoParens w2 (Ast.SimpleSelectSelectClause (Ast.ValuesSimpleSelect (Ast.ValuesClause rows'))) s l f))) c r))
+            let (acc, rows') = mapAccumL (\a (Ast.ExprList es) -> Ast.ExprList <$> mapAccumL param a es) [] rows
+             in (reverse acc, Ast.InsertPreparableStmt (Ast.InsertStmt w t (Ast.SelectInsertRest cols o (Ast.NoParensSelectStmt (Ast.SelectNoParens w2 (Ast.SimpleSelectSelectClause (Ast.ValuesSimpleSelect (Ast.ValuesClause rows'))) s l f))) c r))
     Ast.UpdatePreparableStmt (Ast.UpdateStmt w rel (Ast.SetClauseList clauses) f wh r) ->
-        let (ns, clauses') = traverse setClause clauses
-         in (ns, Ast.UpdatePreparableStmt (Ast.UpdateStmt w rel (Ast.SetClauseList clauses') f wh r))
+        let (acc, clauses') = mapAccumL setClause [] clauses
+         in (reverse acc, Ast.UpdatePreparableStmt (Ast.UpdateStmt w rel (Ast.SetClauseList clauses') f wh r))
     other -> ([], other)
   where
-    setClause = \case
-        Ast.TargetSetClause target e -> Ast.TargetSetClause target <$> param e
-        other -> ([], other)
-    param = \case
-        Ast.TypecastAExpr p@(Ast.CExprAExpr (Ast.ParamCExpr n Nothing)) _ -> ([n], p)
-        e -> ([], e)
+    setClause acc = \case
+        Ast.TargetSetClause target e -> Ast.TargetSetClause target <$> param acc e
+        other -> (acc, other)
+    param acc = \case
+        Ast.TypecastAExpr (Ast.CExprAExpr (Ast.ParamCExpr n Nothing)) _ ->
+            let placeholder = count + length acc + 1
+             in ((n, placeholder) : acc, Ast.CExprAExpr (Ast.ParamCExpr placeholder Nothing))
+        e -> (acc, e)
 
 
 -- * Narrowing conversions
