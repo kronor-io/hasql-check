@@ -132,7 +132,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create domain positive_cents as cents check (value > 0); create table wallet (balance positive_cents not null); create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}')"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create domain positive_cents as cents check (value > 0); create table wallet (balance positive_cents not null); create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}'); create table totals (id int4 primary key, amounts int8[] not null)"]
                 action conn
 
 
@@ -368,6 +368,14 @@ typesSpec = do
         (code, out) <- types conn "vectorStatement" "select amount :: int4 from ledger"
         code `shouldBe` ExitSuccess
         out `shouldSatisfy` ("column 1 (amount) is annotated integer, but is a bigint: it may overflow" `isInfixOf`)
+
+    itWithOuter "warns about an array read as one of narrower elements" \conn -> do
+        (_, out) <- types conn "vectorStatement" "select amounts :: int4[] from totals"
+        out `shouldSatisfy` ("column 1 (amounts) is annotated integer[], but is a bigint[]: it may overflow" `isInfixOf`)
+
+    itWithOuter "warns about an array parameter assigned to a column of narrower elements" \conn -> do
+        (_, out) <- types conn "resultlessStatement" "update tagged set scores = $1 :: int8[]"
+        out `shouldSatisfy` ("parameter $1 is annotated bigint[], but is assigned to an integer[] column: it may overflow" `isInfixOf`)
 
     itWithOuter "warns only when asked" \conn ->
         runOn [] ["--database", Text.unpack conn] "f = [vectorStatement|select amount :: int4 from ledger|]\n" `shouldReturn` (ExitSuccess, "")
@@ -811,6 +819,15 @@ inferredSpec = do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select labels from tagged" [] (Just [Column "Data.Vector.Vector Int64" "int8[]" False])]
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("column 1 (labels) is text[], but is read as Data.Vector.Vector Int64 (bigint[]), which Postgres converts it to only when told to" `isInfixOf`)
+
+    itWithOuter "warns about an array read as one of narrower elements, whose cast is accepted" \conn -> do
+        (code, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select amounts from totals" [] (Just [Column "Data.Vector.Vector Int32" "int4[]" False])]
+        code `shouldBe` ExitSuccess
+        out `shouldSatisfy` ("column 1 (amounts) is read as integer[], but is a bigint[]: it may overflow" `isInfixOf`)
+
+    itWithOuter "warns about an array parameter sent to a column of narrower elements" \conn -> do
+        (_, out) <- runInferred conn ["--types"] [inferredQuote "resultlessStatement" "update tagged set scores = $1" [Column "Data.Vector.Vector Int64" "int8[]" False] Nothing]
+        out `shouldSatisfy` ("parameter $1 is sent as bigint[], but is assigned to an integer[] column: it may overflow" `isInfixOf`)
 
     itWithOuter "warns about a nullable array read without a Maybe" \conn -> do
         (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False])]
