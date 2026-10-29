@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0.0
+
+Add `Hasql.Check.Inferred.TH`: quoters for statements without annotations,
+whose parameter and result types come from the Haskell types they are used
+at. Add `hasql-check-hie`, which reads those types from GHC's `.hie` files,
+and `--inferred`, which checks the statements it finds.
+
 ## 0.4.0.0
 
 Add `--types`, and `HASQL_CHECK_TYPES` for compile-time checks: warn about

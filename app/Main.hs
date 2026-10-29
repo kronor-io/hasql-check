@@ -17,6 +17,7 @@ import Data.Text qualified
 import Data.Text.Encoding qualified
 import Hasql.Check
 import Hasql.Check.Finding
+import Hasql.Check.Inferred.Quote (Inferred (..), annotated, checkShape, readInferred)
 import Hasql.Check.Lexer
 import Hasql.Check.Nullability qualified as Nullability
 import Hasql.Check.Parser
@@ -28,6 +29,7 @@ import Hasql.Session qualified
 import Pqi qualified
 import Pqi.Ffi qualified
 import System.Console.GetOpt
+import System.Directory (doesFileExist)
 import System.Environment (getArgs, getProgName)
 import System.Environment qualified
 import System.Exit (ExitCode (ExitFailure), exitSuccess, exitWith)
@@ -45,6 +47,7 @@ data Options = Options
     , writeBaseline :: Maybe FilePath
     , failOnWarnings :: Bool
     , filesFrom :: Maybe FilePath
+    , inferred :: [FilePath]
     , showHelp :: Bool
     }
 
@@ -61,6 +64,7 @@ defaultOptions =
         , writeBaseline = Nothing
         , failOnWarnings = False
         , filesFrom = Nothing
+        , inferred = []
         , showHelp = False
         }
 
@@ -113,6 +117,11 @@ options =
         (ReqArg (\s o -> o{filesFrom = Just s}) "FILE")
         "also check the NUL-separated file names in FILE, or stdin if FILE is -"
     , Option
+        []
+        ["inferred"]
+        (ReqArg (\s o -> o{inferred = s : o.inferred}) "FILE")
+        "also check the quotes of Hasql.Check.Inferred.TH in FILE, as hasql-check-hie writes them, or stdin if FILE is - (repeatable)"
+    , Option
         ['h']
         ["help"]
         (NoArg (\o -> o{showHelp = True}))
@@ -159,7 +168,7 @@ execOpts = do
                         , not (Data.ByteString.null name)
                         ]
             let allFiles = files <> listed
-            when (null allFiles && null opts.filesFrom) do
+            when (null allFiles && null opts.filesFrom && null opts.inferred) do
                 usage >>= hPutStr stderr
                 exitWith (ExitFailure 2)
             pure (opts, allFiles)
@@ -214,11 +223,41 @@ data PrepareError
 
 
 -- | The checked quasiquotes in each file, or why the file could not be read.
-collect :: [Text] -> [FilePath] -> IO [(FilePath, Either String [QuasiQuote])]
+collect :: [Text] -> [FilePath] -> IO [(FilePath, Either String [(QuasiQuote, Maybe Inferred)])]
 collect quoters files =
     forM files \file -> do
         errParse <- parseFile file
-        pure (file, filter (\(QuasiQuote (_, quoter) _) -> isQuoterIn quoters quoter) <$> errParse)
+        pure (file, map (,Nothing) . filter (\(QuasiQuote (_, quoter) _) -> isQuoterIn quoters quoter) <$> errParse)
+
+
+-- | The inferred quotes in each file, each standing for the hasql-th quote
+-- its Haskell types annotate it as.
+collectInferred :: [FilePath] -> IO [(FilePath, Either String [(QuasiQuote, Maybe Inferred)])]
+collectInferred paths =
+    concat <$> forM paths \path -> do
+        contents <- if path == "-" then Data.ByteString.getContents else Data.ByteString.readFile path
+        case readInferred contents of
+            Left err -> pure [(path, Left err)]
+            Right quotes ->
+                pure
+                    [ case annotated q of
+                        Left err -> (q.file, Left (q.file <> ":" <> show q.line <> ":" <> show q.column <> ": " <> err))
+                        Right sql -> (q.file, Right [(QuasiQuote (here, q.quoter) (here, sql), Just q)])
+                    | q <- quotes
+                    , let here = AlexPn 0 q.line q.column
+                    ]
+
+
+-- | A finding about an inferred quote, in terms of its Haskell types rather
+-- than the annotations they stand for.
+inHaskellTerms :: String -> String
+inHaskellTerms m =
+    Data.Text.unpack
+        . Data.Text.replace "is annotated " (if "parameter " `Data.Text.isPrefixOf` t then "is sent as " else "is read as ")
+        . Data.Text.replace "is annotated non-null" "is not a Maybe in Haskell"
+        $ t
+  where
+    t = Data.Text.pack m
 
 
 location :: FilePath -> QuasiQuote -> String
@@ -229,12 +268,12 @@ location file (QuasiQuote (AlexPn _ quoterRow quoterCol, _) _) =
 main :: IO ()
 main = do
     (opts, fileList) <- execOpts
-    parsed <- collect (opts.extraQuoters <> quotersSupported) fileList
+    parsed <- (<>) <$> collect (opts.extraQuoters <> quotersSupported) fileList <*> collectInferred (reverse opts.inferred)
     if opts.listOnly
         then do
             forM_ parsed \case
                 (file, Left err) -> putStrLn ("Error in " <> file <> "\n" <> err)
-                (file, Right qqs) -> forM_ qqs \qq@(QuasiQuote (_, quoter) _) ->
+                (file, Right qqs) -> forM_ qqs \(qq@(QuasiQuote (_, quoter) _), _) ->
                     putStrLn (location file qq <> ": " <> Data.Text.unpack quoter)
             when (any (isLeft . snd) parsed) (exitWith (ExitFailure 1))
         else do
@@ -253,9 +292,18 @@ main = do
                         putStrLn err
                         pure [Left (ParseError file err)]
                     (file, Right qqs) -> do
-                        fileLines <- Data.Text.lines . Data.Text.Encoding.decodeUtf8Lenient <$> Data.ByteString.readFile file
-                        forM qqs \qq@(QuasiQuote (AlexPn _ line _, quoter) (_, stmt)) -> do
-                            errPrepare <- Hasql.Check.prepare libPqConn "" stmt
+                        -- An inferred quote's file may not be where it was
+                        -- compiled from; it then has no directives.
+                        exists <- doesFileExist file
+                        fileLines <- if exists then Data.Text.lines . Data.Text.Encoding.decodeUtf8Lenient <$> Data.ByteString.readFile file else pure []
+                        forM qqs \(qq@(QuasiQuote (AlexPn _ line _, quoter) (_, stmt)), inferredQuote) -> do
+                            errShape <- case (inferredQuote, renderSql stmt) of
+                                (Just q, Right rendered) -> checkShape libPqConn q rendered
+                                _ -> pure []
+                            errPrepare <-
+                                if null errShape
+                                    then Hasql.Check.prepare libPqConn "" stmt
+                                    else pure (Left (unlines errShape))
                             case errPrepare of
                                 Left err -> do
                                     putStrLn ("Error in " <> location file qq)
@@ -272,7 +320,7 @@ main = do
                                             (kept, messages) = settle checkedRules (directivesAbove fileLines line) baseline h (nullable <> narrowing)
                                         when (not (null messages)) do
                                             putStrLn ("Warning in " <> location file qq)
-                                            forM_ messages \m -> putStrLn ("  " <> m)
+                                            forM_ messages \m -> putStrLn ("  " <> maybe id (const inHaskellTerms) inferredQuote m)
                                         pure (Right (length messages, [BaselineEntry h f.rule f.subject (Data.Text.pack (location file qq)) | f <- kept]))
                                     _ -> pure (Right (0, []))
             let (warningCounts, entries) = unzip (rights results)

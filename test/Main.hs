@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE QuasiQuotes #-}
 
 module Main where
 
@@ -6,15 +7,23 @@ import Control.Exception (SomeException, bracket_, try)
 import Control.Monad (void)
 import Data.ByteString.Lazy qualified as ByteString.Lazy
 import Data.Either (isLeft)
+import Data.Int (Int32, Int64)
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text.Encoding
+import Hasql.Check.Inferred (Piece (..), render)
+import Hasql.Check.Inferred.TH qualified as Inferred
 import Hasql.Check.Lexer (AlexPosn (..))
 import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
 import Hasql.Check.TH qualified as Checked
+import Hasql.Connection qualified as Connection
+import Hasql.Connection.Settings qualified as Settings
+import Hasql.Session qualified as Session
+import Hasql.Statement (Statement)
 import Language.Haskell.TH (runQ)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
+import Pqi.Ffi qualified
 import System.Directory (findExecutable)
 import System.Environment (getEnvironment, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
@@ -33,6 +42,9 @@ main = sydTest do
     describe "hasql-check --nullability" $ aroundAll withPostgres nullabilitySpec
     describe "hasql-check --types" $ aroundAll withPostgres typesSpec
     describe "suppressing warnings" $ aroundAll withPostgres suppressionSpec
+    describe "Hasql.Check.Inferred.TH" piecesSpec
+    describe "inferred statements" $ aroundAll withPostgres runtimeSpec
+    describe "hasql-check --inferred" $ aroundAll withPostgres inferredSpec
     -- These share the process's environment and the module's one connection,
     -- so they run one at a time, in order.
     describe "Hasql.Check.TH" $ sequential $ doNotRandomiseExecutionOrder $ aroundAll withPostgres thSpec
@@ -116,7 +128,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents)"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red')"]
                 action conn
 
 
@@ -499,3 +511,155 @@ suppressionSpec = do
             checkSource conn ["--nullability", "--fail-on-warnings", "--baseline", baseline] source `shouldReturn` (ExitSuccess, "")
             checkSource conn ["--nullability", "--fail-on-warnings"] ("-- hasql-check: allow nullable(\"display name\")\n" <> source)
                 `shouldReturn` (ExitSuccess, "")
+
+
+-- | The SQL the inferred quoters send for a statement, given the Postgres
+-- types of its parameters and result columns.
+sent :: Text -> [Text] -> [Text] -> Either String Text
+sent sql paramTypes columnTypes = render paramTypes columnTypes <$> Inferred.pieces sql
+
+
+piecesSpec :: Spec
+piecesSpec = do
+    it "annotates each parameter and result column" $
+        sent "select email, nickname from customer where id = $1" ["int8"] ["text", "text"]
+            `shouldBe` Right "SELECT (email) :: text, (nickname) :: text FROM customer WHERE id = $1 :: int8"
+
+    it "annotates an expression as a whole, and keeps its alias" $
+        sent "select a + b as total from t" [] ["int8"]
+            `shouldBe` Right "SELECT (a + b) :: int8 AS total FROM t"
+
+    it "annotates every occurrence of a parameter" $
+        sent "select a from t where b = $1 or c = $1" ["int4"] ["text"]
+            `shouldBe` Right "SELECT (a) :: text FROM t WHERE b = $1 :: int4 OR c = $1 :: int4"
+
+    it "annotates RETURNING" $
+        sent "update t set a = $1 returning id" ["text"] ["int8"]
+            `shouldBe` Right "UPDATE t SET a = $1 :: text RETURNING (id) :: int8"
+
+    it "annotates both sides of a UNION" $
+        sent "select a from t union all select b from u" [] ["int8"]
+            `shouldBe` Right "SELECT (a) :: int8 FROM t UNION ALL SELECT (b) :: int8 FROM u"
+
+    it "leaves the result columns behind a * alone" $
+        sent "select * from t where id = $1" ["int8"] ["int8", "text"]
+            `shouldBe` Right "SELECT * FROM t WHERE id = $1 :: int8"
+
+    it "leaves a column the Haskell type does not read unannotated" $
+        sent "select a, b from t" [] ["int8"]
+            `shouldBe` Right "SELECT (a) :: int8, (b) FROM t"
+
+    it "cuts the statement where the annotations go" $
+        Inferred.pieces "select a from t where b = $1"
+            `shouldBe` Right [Sql "SELECT (a)", ColumnType 1, Sql " FROM t WHERE b = $1", ParamType 1]
+
+    it "rejects SQL it cannot parse" $
+        Inferred.pieces "select from where" `shouldSatisfy` isLeft
+
+
+-- | Run a statement on the test database.
+runStatement :: Text -> params -> Statement params result -> IO result
+runStatement conn params statement = do
+    Right c <- Connection.acquire Pqi.Ffi.adapter (Settings.connectionString conn)
+    result <- Connection.use c (Session.statement params statement)
+    Connection.release c
+    either (\e -> expectationFailure (show e) >> error "unreachable") pure result
+
+
+runtimeSpec :: TestDef '[Text] ()
+runtimeSpec = do
+    itWithOuter "reads a varchar column as Text" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select label from tag where id = $1|]
+            `shouldReturn` ("red" :: Text)
+
+    itWithOuter "reads an int4 column as Int64, and sends an Int64 parameter for it" \conn ->
+        runStatement conn (1 :: Int64) [Inferred.singletonStatement|select id from tag where id = $1|]
+            `shouldReturn` (1 :: Int64)
+
+    itWithOuter "reads a tuple, with a Maybe for a NULL" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.maybeStatement|select label, null from tag where id = $1|]
+            `shouldReturn` Just ("red" :: Text, Nothing :: Maybe Text)
+
+    itWithOuter "runs a statement without rows" \conn ->
+        runStatement conn ("blue" :: Text, 2 :: Int64) [Inferred.resultlessStatement|insert into tag (label, id) values ($1, $2)|]
+            `shouldReturn` ()
+
+
+-- | A quote as hasql-check-hie writes it: its SQL, and the qualified names of
+-- its parameter and result types, a nullable one prefixed with "?".
+inferredQuote :: Text -> Text -> [Text] -> Maybe [Text] -> Text
+inferredQuote quoter sql params row =
+    "{\"file\":\"src/Fixture.hs\",\"line\":3,\"column\":7,\"quoter\":\""
+        <> quoter
+        <> "\",\"sql\":\""
+        <> sql
+        <> "\",\"params\":"
+        <> columns params
+        <> ",\"row\":"
+        <> maybe "null" columns row
+        <> "}"
+  where
+    columns cs = "[" <> Text.intercalate "," (map column cs) <> "]"
+    column c = case Text.stripPrefix "?" c of
+        Just t -> "{\"type\":\"" <> t <> "\",\"nullable\":true}"
+        Nothing -> "{\"type\":\"" <> c <> "\",\"nullable\":false}"
+
+
+-- | Run with --inferred on the given quotes and flags.
+runInferred :: Text -> [String] -> [Text] -> IO (ExitCode, String)
+runInferred conn args quotes' =
+    withSystemTempDirectory "hasql-check-inferred" \dir -> do
+        let file = dir </> "quotes.jsonl"
+        ByteString.Lazy.writeFile file (ByteString.Lazy.fromStrict (Text.Encoding.encodeUtf8 (Text.unlines quotes')))
+        (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" (["--database", Text.unpack conn, "--inferred", file] <> args)) ""
+        pure (code, out <> err)
+
+
+int32, int64, text :: Text
+int32 = "GHC.Internal.Int.Int32"
+int64 = "GHC.Internal.Int.Int64"
+text = "Data.Text.Internal.Text"
+
+
+inferredSpec :: TestDef '[Text] ()
+inferredSpec = do
+    itWithOuter "accepts a statement whose Haskell types fit" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select label, id from tag where id = $1" [int64] (Just [text, int64])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects one that does not prepare, and says where it is" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select nope from tag" [] (Just [text])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("src/Fixture.hs:3:7" `isInfixOf`)
+        out `shouldSatisfy` ("column \"nope\" does not exist" `isInfixOf`)
+
+    itWithOuter "rejects a Haskell type with too few columns" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label, id from tag" [] (Just [text])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("the statement returns 2 columns, but the Haskell type reads 1" `isInfixOf`)
+
+    itWithOuter "rejects a column behind a * of another type" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select * from tag" [] (Just [int64, text])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("column 1 (id) is integer, but is read as GHC.Internal.Int.Int64" `isInfixOf`)
+
+    itWithOuter "rejects a Haskell type it knows no Postgres type for" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just ["Shop.Email"])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("src/Fixture.hs:3:7: no Postgres type is known for Shop.Email" `isInfixOf`)
+
+    itWithOuter "warns about a nullable column read without a Maybe" \conn -> do
+        (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [text])]
+        out `shouldSatisfy` ("column 1 (nickname) is not a Maybe in Haskell, but public.account.nickname is nullable" `isInfixOf`)
+
+    itWithOuter "accepts a nullable column read as a Maybe" \conn ->
+        runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just ["?" <> text])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "warns about a column read as a narrower type" \conn -> do
+        (_, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select amount from ledger" [] (Just [int32])]
+        out `shouldSatisfy` ("column 1 (amount) is read as integer, but is a bigint: it may overflow" `isInfixOf`)
+
+    itWithOuter "warns about a parameter assigned to a narrower column" \conn -> do
+        (_, out) <- runInferred conn ["--types"] [inferredQuote "resultlessStatement" "update ledger set small = $1" [int64] Nothing]
+        out `shouldSatisfy` ("parameter $1 is sent as bigint, but is assigned to a smallint column: it may overflow" `isInfixOf`)

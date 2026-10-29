@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            hasql-check
-version:         0.4.0.0
+version:         0.5.0.0
 synopsis:        Check hasql-th statements against a live PostgreSQL schema
 description:
   Finds the hasql-th quasiquotes in Haskell source files and PREPAREs each
@@ -40,7 +40,11 @@ flag kronor-syntax
 library
   exposed-modules:
     Hasql.Check
+    Hasql.Check.Annotate
     Hasql.Check.Finding
+    Hasql.Check.Inferred
+    Hasql.Check.Inferred.Quote
+    Hasql.Check.Inferred.TH
     Hasql.Check.Lexer
     Hasql.Check.Nullability
     Hasql.Check.Parser
@@ -117,13 +121,17 @@ library
     , bytestring
     , containers
     , directory
+    , hasql
     , hasql-th
     , mtl
     , postgresql-syntax
     , pqi
     , pqi-ffi
+    , scientific
     , template-haskell
     , text
+    , time
+    , uuid
 
   if flag(kronor-syntax)
     cpp-options: -DKRONOR_SYNTAX
@@ -196,6 +204,7 @@ executable hasql-check
   build-depends:
     , base         >=4.11 && <10
     , bytestring
+    , directory
     , hasql
     , hasql-check
     , pqi
@@ -228,7 +237,9 @@ test-suite hasql-check-test
     , bytestring
     , directory
     , filepath
+    , hasql
     , hasql-check
+    , pqi-ffi
     , process
     , sydtest
     , template-haskell

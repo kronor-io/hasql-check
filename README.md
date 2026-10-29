@@ -16,7 +16,9 @@ HINT:  Perhaps you meant to reference the column "customer.email".
 ```
 
 It runs as a command for CI, and as a drop-in replacement for `Hasql.TH`
-that reports the same errors while GHC compiles.
+that reports the same errors while GHC compiles. It also comes with quoters
+that need no annotations at all, taking the types from how the statement is
+used in Haskell.
 
 ## Contents
 
@@ -29,6 +31,7 @@ that reports the same errors while GHC compiles.
 - [Adopting it in an existing codebase](#adopting-it-in-an-existing-codebase)
 - [Running it in CI](#running-it-in-ci)
 - [Checking while you compile](#checking-while-you-compile)
+- [Statements without annotations](#statements-without-annotations)
 - [Reference](#reference)
 - [Limitations](#limitations)
 
@@ -353,6 +356,113 @@ their own; for `cabal build`, also list the file in the package's
 `extra-source-files`. Keep running the command in CI, which checks everything
 regardless.
 
+## Statements without annotations
+
+`Hasql.Check.Inferred.TH` has quoters that take no annotations. The Haskell
+type a statement is used at decides its parameter and result types:
+
+```haskell
+import Hasql.Check.Inferred.TH
+
+profile :: Statement Int64 (Maybe (Text, Maybe Text))
+profile = [maybeStatement| select email, nickname from customer where id = $1 |]
+```
+
+The quoter sends the statement with the annotations hasql-th would have
+asked for:
+
+```sql
+SELECT (email) :: text, (nickname) :: text FROM customer WHERE id = $1 :: int8
+```
+
+The annotations are casts, so a `varchar` column can be read as `Text` and an
+`int4` one as `Int64`. Without them, hasql's decoders need the exact type, and
+fail at runtime.
+
+The type does not have to be on the binding. GHC infers it from how the rows
+are used, as it does for any other value:
+
+```haskell
+cancelPayment :: Int64 -> Text -> Session ()
+
+cancelAll :: Int64 -> Session ()
+cancelAll merchantId = do
+    payments <- Session.statement merchantId [vectorStatement| select id, reference from payment where merchant_id = $1 |]
+    for_ payments \(paymentId, reference) -> cancelPayment paymentId reference
+```
+
+Here the statement is a `Statement Int64 (Vector (Int64, Text))`, without
+saying so anywhere.
+
+Each Haskell type stands for one Postgres type:
+
+| Haskell | Postgres |
+|---|---|
+| `Bool` | `bool` |
+| `Int16`, `Int32`, `Int64` | `int2`, `int4`, `int8` |
+| `Float`, `Double` | `float4`, `float8` |
+| `Scientific` | `numeric` |
+| `Text` | `text` |
+| `ByteString` | `bytea` |
+| `UUID` | `uuid` |
+| `Day`, `TimeOfDay` | `date`, `time` |
+| `LocalTime`, `UTCTime` | `timestamp`, `timestamptz` |
+| `Aeson.Value` | `jsonb` |
+| `Maybe a` | `a`, and may be NULL |
+
+Parameters and rows are a single value or a tuple of up to eight, and `()`
+for no parameters.
+
+### Checking them
+
+The types are only known once GHC has type-checked the module, after the
+quoter ran, so these statements are not checked while they compile. Instead,
+have GHC write `.hie` files, and read the types from them with
+`hasql-check-hie`:
+
+```
+$ cabal build --ghc-options='-fwrite-ide-info -hiedir=.hie'
+$ hasql-check-hie $(find .hie -name '*.hie') > statements.jsonl
+$ hasql-check --inferred statements.jsonl --nullability --types
+```
+
+Given this module:
+
+```haskell
+profile :: Statement Int64 (Maybe (Text, Maybe Text))
+profile = [maybeStatement| select email, nickname from customer where id = $1 |]
+
+orderTotal :: Statement Int64 (Maybe Int32)
+orderTotal = [maybeStatement| select total_cents from orders where id = $1 |]
+
+totals :: Statement () (Vector (Text, Int64))
+totals = [vectorStatement| select c.email, o.total_cents from customer c left join orders o on o.customer_id = c.id |]
+
+setQuantity :: Statement (Int64, Int64) ()
+setQuantity = [resultlessStatement| update orders set quantity = $1 where id = $2 |]
+```
+
+it reports, in terms of the Haskell types:
+
+```
+Warning in src/Shop/Orders.hs:15:14
+  column 1 (total_cents) is read as integer, but is a bigint: it may overflow
+Warning in src/Shop/Orders.hs:18:10
+  column 2 (total_cents) is not a Maybe in Haskell, but comes from the nullable side of an outer join
+Warning in src/Shop/Orders.hs:21:15
+  parameter $1 is sent as bigint, but is assigned to a smallint column: it may overflow
+```
+
+Each statement is checked as the annotated hasql-th statement it is sent as,
+so everything above applies: errors, directives, baselines and
+`--fail-on-warnings`. It also fails when the Haskell type reads a different
+number of columns than the statement returns.
+
+`hasql-check-hie` needs no database, so it can run inside a sandboxed build,
+such as a Nix derivation, with only the `--inferred` step outside it. The
+`.hie` format changes with each GHC release, so build `hasql-check-hie` with
+the GHC your project uses.
+
 ## Reference
 
 ### Options
@@ -366,6 +476,7 @@ regardless.
 | `--write-baseline FILE` | Write the current findings to `FILE`. |
 | `--fail-on-warnings` | Exit 1 if anything is warned about. |
 | `--files0-from FILE` | Also check the NUL-separated file names in `FILE`, or on stdin with `-`. |
+| `--inferred FILE` | Also check the statements of `Hasql.Check.Inferred.TH` in `FILE`, as `hasql-check-hie` writes them, or on stdin with `-`. Repeatable. |
 | `-q`, `--quoter NAME` | Also check quotes using this quoter, for your own quoters built on hasql-th. Repeatable. |
 | `-l`, `--list` | List the quotes that would be checked, without connecting. |
 
@@ -396,6 +507,10 @@ The warnings go to stderr in GHC's format, rather than through GHC, so
   apart: `UNION`s, and `SELECT *`.
 - They need the plan, so a statement that reads a session setting the
   connection lacks is only partly checked; see [Running it in CI](#running-it-in-ci).
+- The quoters without annotations know only the types in the table above:
+  no arrays, enums, composite types or `newtype`s yet. Behind a `SELECT *`
+  they cannot annotate the result columns, which must then have exactly the
+  types the Haskell values are read as.
 - The default build parses statements as upstream hasql-th does. Building with
   the `kronor-syntax` flag instead accepts the Haskell targets
   (`$f (a :: int8)`) and parameter fields (`$1.$field`) of Kronor's hasql-th
