@@ -132,7 +132,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red')"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}')"]
                 action conn
 
 
@@ -561,6 +561,10 @@ piecesSpec = do
         sent "select ' :: hasql_check_slot_1'" [] ["text"]
             `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT ' :: hasql_check_slot_1') SELECT c1 :: text FROM hasql_check_result"
 
+    it "annotates an array parameter" $
+        sent "select a from t where id = any($1)" ["int8[]"] ["text"]
+            `shouldBe` Right "WITH hasql_check_result (c1) AS (SELECT a FROM t WHERE id = ANY ($1 :: int8[])) SELECT c1 :: text FROM hasql_check_result"
+
     it "sends a statement without rows as it is" $
         sent "delete from t where id = $1" ["int8"] []
             `shouldBe` Right "DELETE FROM t WHERE id = $1 :: int8"
@@ -630,6 +634,18 @@ runtimeSpec = do
     itWithOuter "sends and reads a newtype as the domain it derives" \conn ->
         runStatement conn (Cents 5) [Inferred.singletonStatement|select $1|]
             `shouldReturn` Cents 5
+
+    itWithOuter "reads an array as a Vector" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select labels from tagged where id = $1|]
+            `shouldReturn` Vector.fromList ["a", "b" :: Text]
+
+    itWithOuter "reads an int4[] with NULLs as a Vector of Maybe Int64" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select scores from tagged where id = $1|]
+            `shouldReturn` Vector.fromList [Just 1, Nothing, Just (3 :: Int64)]
+
+    itWithOuter "sends a list as an array" \conn ->
+        runStatement conn [1, 2 :: Int64] [Inferred.vectorStatement|select id from tagged where id = any($1)|]
+            `shouldReturn` Vector.fromList [1 :: Int64]
 
     itWithOuter "runs a statement without rows" \conn ->
         runStatement conn ("blue" :: Text, 2 :: Int64) [Inferred.resultlessStatement|insert into tag (label, id) values ($1, $2)|]
@@ -786,6 +802,19 @@ inferredSpec = do
         (code, out) <- runInferred conn [] [inferredQuote "vectorStatement" "select name from account" [] (Just [Column "Shop.Nickname" "int8" False])]
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("column 1 (name) is text, but is read as Shop.Nickname (bigint), which Postgres converts it to only when told to" `isInfixOf`)
+
+    itWithOuter "accepts an array whose elements Postgres converts on its own" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" True])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects an array whose elements Postgres converts only when told to" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select labels from tagged" [] (Just [Column "Data.Vector.Vector Int64" "int8[]" False])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("column 1 (labels) is text[], but is read as Data.Vector.Vector Int64 (bigint[]), which Postgres converts it to only when told to" `isInfixOf`)
+
+    itWithOuter "warns about a nullable array read without a Maybe" \conn -> do
+        (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False])]
+        out `shouldSatisfy` ("column 1 (scores) is not a Maybe in Haskell, but public.tagged.scores is nullable" `isInfixOf`)
 
     itWithOuter "rejects a Postgres type the database does not have" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False])]

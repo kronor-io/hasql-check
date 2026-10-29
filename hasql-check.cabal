@@ -132,6 +132,7 @@ library
     , text
     , time
     , uuid
+    , vector
 
   if flag(kronor-syntax)
     cpp-options: -DKRONOR_SYNTAX

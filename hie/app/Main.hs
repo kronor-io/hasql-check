@@ -135,10 +135,11 @@ columns isParams t names = list (zipWith column (split t) names)
             , ("nullable", if nullable then "true" else "false")
             ]
     qualified = \case
-        Con m n _ -> if null m then n else m <> "." <> n
+        Con m n args -> unwords ((if null m then n else m <> "." <> n) : map (parenthesised . qualified) args)
         Lit s -> show s
         Var -> "?"
     list xs = "[" <> intercalate "," xs <> "]"
+    parenthesised name = if ' ' `elem` name then "(" <> name <> ")" else name
 
 
 -- | A type-level list of strings.

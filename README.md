@@ -412,6 +412,7 @@ Each Haskell type stands for one Postgres type:
 | `LocalTime`, `UTCTime` | `timestamp`, `timestamptz` |
 | `Aeson.Value` | `jsonb` |
 | `Maybe a` | `a`, and may be NULL |
+| `Vector a`, `[a]` | `a[]`; `Vector (Maybe a)` for elements that may be NULL |
 
 Parameters and rows are a single value or a tuple of up to eight, and `()`
 for no parameters.
@@ -563,8 +564,9 @@ The warnings go to stderr in GHC's format, rather than through GHC, so
   apart: `UNION`s, and `SELECT *`.
 - They need the plan, so a statement that reads a session setting the
   connection lacks is only partly checked; see [Running it in CI](#running-it-in-ci).
-- The quoters without annotations do not take arrays, enums or composite
-  types yet. A `CALL` cannot be
+- The quoters without annotations do not take enums or composite types
+  yet, nor arrays of more than one dimension. A `String` is not an array:
+  use `Text`. A `CALL` cannot be
   wrapped, so its result columns must have exactly the types they are read
   as.
 - The default build parses statements as upstream hasql-th does. Building with

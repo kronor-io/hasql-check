@@ -210,8 +210,27 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
             | not converts
             ]
     -- Through their base types, so that a domain converts as the type it is
-    -- over.
+    -- over; and an array as its elements, as Postgres converts arrays.
+    convertsWithoutBeingTold :: Word32 -> Word32 -> IO Bool
     convertsWithoutBeingTold from to =
+        query
+            conn
+            ( mconcat
+                [ "SELECT f.typelem::text, t.typelem::text FROM pg_catalog.pg_type f, pg_catalog.pg_type t"
+                , " WHERE f.oid = "
+                , base from
+                , " AND t.oid = "
+                , base to
+                , " AND f.typcategory = 'A' AND t.typcategory = 'A'"
+                ]
+            )
+            >>= \case
+                Right [[Just f, Just t]]
+                    | Just f' <- readMaybe (ByteString.Char8.unpack f)
+                    , Just t' <- readMaybe (ByteString.Char8.unpack t) ->
+                        convertsWithoutBeingTold f' t'
+                _ -> scalarConverts from to
+    scalarConverts from to =
         query
             conn
             ( mconcat

@@ -64,7 +64,8 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Time (Day, LocalTime, TimeOfDay, UTCTime)
 import Data.UUID (UUID)
-import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
+import Data.Vector (Vector)
+import GHC.TypeLits (AppendSymbol, KnownSymbol, Symbol, symbolVal)
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Statement (Statement)
@@ -196,6 +197,22 @@ instance Value a => Value (Domain name a) where
     type PgType (Domain name a) = name
     encodeValue = (\(Domain a) -> a) >$< encodeValue
     decodeValue = Domain <$> decodeValue
+
+
+-- | A one-dimensional array, whose elements may be NULL when they are
+-- 'Maybe's: a @Vector Int64@ is an @int8[]@.
+instance Column a => Value (Vector a) where
+    type PgType (Vector a) = AppendSymbol (PgColumnType a) "[]"
+    encodeValue = E.foldableArray encodeColumn
+    decodeValue = D.vectorArray decodeColumn
+
+
+-- | A one-dimensional array, as a list. A 'String' is not one: 'Char' has no
+-- Postgres type; use 'Text'.
+instance Column a => Value [a] where
+    type PgType [a] = AppendSymbol (PgColumnType a) "[]"
+    encodeValue = E.foldableArray encodeColumn
+    decodeValue = D.listArray decodeColumn
 
 
 -- | A column or parameter, which may be NULL when it is a 'Maybe'.
