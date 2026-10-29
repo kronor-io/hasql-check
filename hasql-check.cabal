@@ -12,10 +12,11 @@ homepage:        https://github.com/kronor-io/hasql-check
 bug-reports:     https://github.com/kronor-io/hasql-check/issues
 license:         BSD-3-Clause
 license-file:    LICENSE
-author:          Kronor
-maintainer:      lorenzo@kronor.io
+author:          Pranay Sashank, Jose Lorenzo Rodriguez
+maintainer:      lorenzo@kronor.io, pranay.sashank@kronor.io
 copyright:       2021-2026 Kronor
 build-type:      Simple
+tested-with:     GHC ==9.10.3 || ==9.12.4 || ==9.14.1
 extra-doc-files:
   ChangeLog.md
   README.md
@@ -116,31 +117,31 @@ library
     ghc-options: -Werror
 
   build-depends:
-    , aeson
-    , array
-    , base               >=4.11 && <10
-    , bytestring
-    , containers
-    , directory
-    , hasql
-    , hasql-th
-    , mtl
-    , postgresql-syntax
-    , pqi
-    , pqi-ffi
-    , scientific
-    , template-haskell
-    , text
-    , time
-    , uuid
-    , vector
+    , aeson              >=2.0  && <2.4
+    , array              >=0.5  && <0.6
+    , base               >=4.20 && <4.23
+    , bytestring         >=0.11 && <0.13
+    , containers         >=0.6  && <0.9
+    , directory          >=1.3  && <1.4
+    , hasql              >=2.0  && <2.1
+    , hasql-th           >=0.5  && <0.6
+    , mtl                >=2.2  && <2.4
+    , postgresql-syntax  >=0.5  && <0.6
+    , pqi                >=1.1  && <1.2
+    , pqi-ffi            >=1.0  && <1.1
+    , scientific         >=0.3  && <0.4
+    , template-haskell   >=2.18 && <2.25
+    , text               >=2.0  && <2.2
+    , time               >=1.11 && <1.17
+    , uuid               >=1.3  && <1.4
+    , vector             >=0.12 && <0.14
 
   if flag(kronor-syntax)
     cpp-options: -DKRONOR_SYNTAX
 
   build-tool-depends:
-    , alex:alex
-    , happy:happy
+    , alex:alex   >=3.2  && <4
+    , happy:happy >=1.20 && <3
 
 executable hasql-check
   main-is:            Main.hs
@@ -204,15 +205,15 @@ executable hasql-check
     -freverse-errors -fhide-source-paths
 
   build-depends:
-    , base         >=4.11 && <10
-    , bytestring
-    , directory
-    , filepath
-    , hasql
+    , base         >=4.20 && <4.23
+    , bytestring   >=0.11 && <0.13
+    , directory    >=1.3  && <1.4
+    , filepath     >=1.4  && <1.6
+    , hasql        >=2.0  && <2.1
     , hasql-check
-    , pqi
-    , pqi-ffi
-    , text
+    , pqi          >=1.1  && <1.2
+    , pqi-ffi      >=1.0  && <1.1
+    , text         >=2.0  && <2.2
 
   if flag(lint)
     ghc-options: -Werror
@@ -236,19 +237,19 @@ test-suite hasql-check-test
     ghc-options: -Werror
 
   build-depends:
-    , base              >=4.11 && <10
-    , bytestring
-    , directory
-    , filepath
-    , hasql
+    , base              >=4.20 && <4.23
+    , bytestring        >=0.11 && <0.13
+    , directory         >=1.3  && <1.4
+    , filepath          >=1.4  && <1.6
+    , hasql             >=2.0  && <2.1
     , hasql-check
-    , pqi-ffi
-    , process
-    , sydtest
-    , template-haskell
-    , temporary
-    , text
-    , vector
+    , pqi-ffi           >=1.0  && <1.1
+    , process           >=1.6  && <1.7
+    , sydtest           >=0.19 && <0.34
+    , template-haskell  >=2.18 && <2.25
+    , temporary         >=1.3  && <1.4
+    , text              >=2.0  && <2.2
+    , vector            >=0.12 && <0.14
 
   build-tool-depends: hasql-check:hasql-check
 

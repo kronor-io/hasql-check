@@ -24,10 +24,14 @@ homepage:      https://github.com/kronor-io/hasql-check
 bug-reports:   https://github.com/kronor-io/hasql-check/issues
 license:       BSD-3-Clause
 license-file:  LICENSE
-author:        Kronor
-maintainer:    lorenzo@kronor.io
+author:        Pranay Sashank, Jose Lorenzo Rodriguez
+maintainer:    lorenzo@kronor.io, pranay.sashank@kronor.io
 copyright:     2026 Kronor
 build-type:    Simple
+tested-with:   GHC ==9.12.4
+extra-doc-files:
+  ChangeLog.md
+  README.md
 
 source-repository head
   type:     git
@@ -62,22 +66,22 @@ library
 
   hs-source-dirs:  src
   build-depends:
-    , base         >=4.11    && <10
-    , bytestring
-    , ghc          >=9.12    && <9.13
+    , base         >=4.21 && <4.22
+    , bytestring   >=0.11 && <0.13
+    , ghc          >=9.12 && <9.13
     , hasql-check  ==0.5.0.0
-    , text
+    , text         >=2.0  && <2.2
 
 executable hasql-check-hie
   import:         warnings
   main-is:        Main.hs
   hs-source-dirs: app
   build-depends:
-    , base             >=4.11 && <10
-    , containers
+    , base             >=4.21 && <4.22
+    , containers       >=0.6  && <0.9
     , ghc              >=9.12 && <9.13
     , hasql-check-ghc
-    , text
+    , text             >=2.0  && <2.2
 
 test-suite hasql-check-ghc-test
   import:         warnings
@@ -85,7 +89,7 @@ test-suite hasql-check-ghc-test
   main-is:        Main.hs
   hs-source-dirs: test
   build-depends:
-    , base             >=4.11 && <10
+    , base             >=4.21 && <4.22
     , hasql-check-ghc
 
 -- Compiles fixture modules with the plugin, against a throwaway PostgreSQL
@@ -97,9 +101,9 @@ test-suite hasql-check-plugin-test
   main-is:        Plugin.hs
   hs-source-dirs: test
   build-depends:
-    , base             >=4.11 && <10
-    , directory
-    , filepath
+    , base             >=4.21 && <4.22
+    , directory        >=1.3  && <1.4
+    , filepath         >=1.4  && <1.6
     , hasql-check-ghc
-    , process
-    , temporary
+    , process          >=1.6  && <1.7
+    , temporary        >=1.3  && <1.4
