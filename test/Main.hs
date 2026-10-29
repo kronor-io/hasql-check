@@ -840,6 +840,20 @@ inferredSpec = do
         (_, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select amount from ledger" [] (Just [int32])]
         out `shouldSatisfy` ("column 1 (amount) is read as integer, but is a bigint: it may overflow" `isInfixOf`)
 
+    itWithOuter "fingerprints an inferred statement by its result types too, for baselines" \conn ->
+        withSystemTempDirectory "hasql-check-baseline" \dir -> do
+            let baseline = dir </> "baseline"
+                readAs t = inferredQuote "vectorStatement" "select amount from ledger" [] (Just [t])
+                int16 = Column "GHC.Internal.Int.Int16" "int2" False
+            _ <- runInferred conn ["--types", "--write-baseline", baseline] [readAs int32]
+            -- The same statement stays suppressed; read as a narrower type, it
+            -- is another statement, and is not.
+            runInferred conn ["--types", "--baseline", baseline, "--fail-on-warnings"] [readAs int32]
+                `shouldReturn` (ExitSuccess, "")
+            (code, out) <- runInferred conn ["--types", "--baseline", baseline, "--fail-on-warnings"] [readAs int16]
+            code `shouldBe` ExitFailure 1
+            out `shouldSatisfy` ("column 1 (amount) is read as smallint, but is a bigint: it may overflow" `isInfixOf`)
+
     itWithOuter "warns about a parameter assigned to a narrower column" \conn -> do
         (_, out) <- runInferred conn ["--types"] [inferredQuote "resultlessStatement" "update ledger set small = $1" [int64] Nothing]
         out `shouldSatisfy` ("parameter $1 is sent as bigint, but is assigned to a smallint column: it may overflow" `isInfixOf`)
