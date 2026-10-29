@@ -546,6 +546,10 @@ piecesSpec = do
         sent "with x as (update t set a = $1 returning a) select a from x" ["int8"] ["int8"]
             `shouldBe` Right "WITH x AS (UPDATE t SET a = $1 :: int8 RETURNING a), hasql_check_result (c1) AS (SELECT a FROM x) SELECT c1 :: int8 FROM hasql_check_result"
 
+    it "keeps a parenthesised statement's WITH list first too" $
+        sent "(with x as (update t set a = 1 returning a) select a from x)" [] ["int8"]
+            `shouldBe` Right "WITH x AS (UPDATE t SET a = 1 RETURNING a), hasql_check_result (c1) AS ((SELECT a FROM x)) SELECT c1 :: int8 FROM hasql_check_result"
+
     it "picks a name the statement does not use" $
         sent "select a from hasql_check_result" [] ["int8"]
             `shouldBe` Right "WITH hasql_check_result_ (c1) AS (SELECT a FROM hasql_check_result) SELECT c1 :: int8 FROM hasql_check_result_"
@@ -689,6 +693,29 @@ inferredSpec = do
             ]
             `shouldReturn` (ExitSuccess, "")
 
+    itWithOuter "accepts a parenthesised statement with a data-modifying WITH" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "(with x as (update tag set label = label returning id) select id from x)" [] (Just [int64])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "warns about a narrowed column of SELECT DISTINCT ON, which a cast in place would break" \conn -> do
+        (_, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select distinct on (t.id) t.id from ledger t order by id" [] (Just [int32])]
+        out `shouldSatisfy` ("column 1 (id) is read as integer, but is a bigint: it may overflow" `isInfixOf`)
+
+    itWithOuter "warns about a nullable column behind a *" \conn -> do
+        (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select * from account" [] (Just [int32, text, text])]
+        out `shouldSatisfy` ("column 3 (nickname) is not a Maybe in Haskell, but public.account.nickname is nullable" `isInfixOf`)
+
+    itWithOuter "still checks a source quote at the same place in another package" \conn ->
+        withSystemTempDirectory "hasql-check-other" \dir -> do
+            let source = dir </> "other" </> "src" </> "Fixture.hs"
+                quotesFile = dir </> "quotes.jsonl"
+            createDirectoryIfMissing True (dir </> "other" </> "src")
+            writeFile source "module Fixture where\n\ng =   [singletonStatement|select nope :: text from account|]\n"
+            ByteString.Lazy.writeFile quotesFile (ByteString.Lazy.fromStrict (Text.Encoding.encodeUtf8 (inferredQuote "singletonStatement" "select 1" [] (Just [int32]))))
+            (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" ["--database", Text.unpack conn, source, "--inferred", quotesFile]) ""
+            code `shouldBe` ExitFailure 1
+            (out <> err) `shouldSatisfy` ("column \"nope\" does not exist" `isInfixOf`)
+
     -- It runs, but whatever it was meant to do with $1, it does not.
     itWithOuter "rejects a statement that does not use a parameter the Haskell type sends" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select $2" [int64, int64] (Just [int64])]
@@ -720,7 +747,7 @@ inferredSpec = do
     itWithOuter "rejects a Haskell type it knows no Postgres type for" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just ["Shop.Email"])]
         code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("src/Fixture.hs:3:7: no Postgres type is known for Shop.Email" `isInfixOf`)
+        out `shouldSatisfy` ("Error in src/Fixture.hs:3:7\nno Postgres type is known for Shop.Email" `isInfixOf`)
 
     itWithOuter "warns about a nullable column read without a Maybe" \conn -> do
         (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [text])]

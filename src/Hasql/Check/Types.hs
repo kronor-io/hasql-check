@@ -25,10 +25,12 @@
 -- @int8@ parameter widens the column, and narrows nothing.
 module Hasql.Check.Types (
     check,
+    checkColumns,
 ) where
 
 import Control.Exception (finally)
 import Control.Monad (forM)
+import Data.ByteString.Char8 qualified as ByteString.Char8
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -39,6 +41,7 @@ import Hasql.Check.Finding (Finding (..), Rule (..))
 import Hasql.Check.Nullability (Annotation (..), Catalogue, baseType, query, strip)
 import PostgresqlSyntax qualified as Ast
 import Pqi qualified
+import Text.Read (readMaybe)
 import Prelude
 
 
@@ -104,6 +107,37 @@ check conn catalogue stmt
                                 <*> d.ftype i
                                 <*> ((/= 0) <$> d.ftable i)
                         pure (Just (Described ps cs))
+
+
+-- | The findings for result columns read as the given Postgres types, by
+-- name, rather than annotated: those of an inferred statement, cast around
+-- it. Every column is checked, expressions too: nobody chose the conversion.
+checkColumns :: Pqi.Connection -> Catalogue -> [Text.Text] -> Ast.PreparableStmt -> IO [Finding]
+checkColumns conn catalogue types stmt = do
+    prepared <- conn.prepare "hasql_check_types_columns" (renderStmt stmt) Nothing
+    status <- maybe (pure Pqi.FatalError) (.resultStatus) prepared
+    if status /= Pqi.CommandOk
+        then pure []
+        else
+            ( conn.describePrepared "hasql_check_types_columns" >>= \case
+                Nothing -> pure []
+                Just d -> do
+                    n <- d.nfields
+                    found <- forM [0 .. n - 1] \i -> (,) <$> (maybe "?column?" (Text.unpack . Text.decodeUtf8Lenient) <$> d.fname i) <*> d.ftype i
+                    expected <- traverse oid types
+                    pure
+                        [ Finding Narrowing (Text.pack name) ("column " <> show i <> " (" <> name <> ") is annotated " <> toName <> ", but is " <> article fromName <> ": " <> consequence)
+                        | length found == length types
+                        , (i :: Int, (name, from), Just to) <- zip3 [1 ..] found expected
+                        , Just (fromName, toName, consequence) <- [lossy (baseType catalogue from) (baseType catalogue to)]
+                        ]
+            )
+                `finally` query conn "DEALLOCATE hasql_check_types_columns"
+  where
+    oid name =
+        query conn (mconcat ["SELECT to_regtype('", Text.encodeUtf8 (Text.replace "'" "''" name), "')::oid::text"]) >>= \case
+            Right [[Just o]] -> pure (readMaybe (ByteString.Char8.unpack o))
+            _ -> pure Nothing
 
 
 data Described = Described
