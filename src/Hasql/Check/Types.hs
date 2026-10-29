@@ -31,6 +31,7 @@ module Hasql.Check.Types (
 import Control.Exception (finally)
 import Control.Monad (forM)
 import Data.ByteString.Char8 qualified as ByteString.Char8
+import Data.Functor ((<&>))
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -62,23 +63,23 @@ check conn catalogue stmt
                     declared = annotated.params <> map (const 0) assigned
                 describe "hasql_check_types_stripped" stripped (Just declared) >>= \case
                     Nothing -> pure []
-                    Just found -> pure (results annotations annotated found <> params assigned annotated found)
+                    Just found -> (<>) <$> results annotations annotated found <*> params assigned annotated found
         )
             `finally` mapM_ (\name -> query conn ("DEALLOCATE " <> name)) ["hasql_check_types_annotated", "hasql_check_types_stripped"]
   where
     results annotations annotated found
-        | length annotations /= length annotated.columns || length found.columns /= length annotated.columns = []
+        | length annotations /= length annotated.columns || length found.columns /= length annotated.columns = pure []
         | otherwise =
-            catMaybes
-                [ narrowing from to <&&> \(fromName, toName, consequence) ->
+            fmap catMaybes . sequence $
+                [ narrowing conn catalogue from to <&> fmap \(fromName, toName, consequence) ->
                     Finding Narrowing (Text.pack name) ("column " <> show i <> " (" <> name <> ") is annotated " <> toName <> ", but is " <> article fromName <> ": " <> consequence)
                 | (i, Annotation{nullable = Just _}, (name, to, _), (_, from, fromTable)) <- zip4 [1 :: Int ..] annotations annotated.columns found.columns
                 , fromTable
                 ]
 
     params assigned annotated found =
-        catMaybes
-            [ narrowing from to <&&> \(fromName, toName, consequence) ->
+        fmap catMaybes . sequence $
+            [ narrowing conn catalogue from to <&> fmap \(fromName, toName, consequence) ->
                 Finding Narrowing (Text.pack ("$" <> show n)) ("parameter $" <> show n <> " is annotated " <> fromName <> ", but is assigned to " <> article toName <> " column: " <> consequence)
             | (n, placeholder) <- assigned
             , Just from <- [lookupParam n annotated]
@@ -86,8 +87,6 @@ check conn catalogue stmt
             ]
 
     lookupParam n d = lookup n (zip [1 ..] d.params)
-
-    narrowing from to = lossy (baseType catalogue from) (baseType catalogue to)
 
     describe name s types = do
         prepared <- conn.prepare name (renderStmt s) types
@@ -125,11 +124,11 @@ checkColumns conn catalogue types stmt = do
                     n <- d.nfields
                     found <- forM [0 .. n - 1] \i -> (,) <$> (maybe "?column?" (Text.unpack . Text.decodeUtf8Lenient) <$> d.fname i) <*> d.ftype i
                     expected <- traverse oid types
-                    pure
-                        [ Finding Narrowing (Text.pack name) ("column " <> show i <> " (" <> name <> ") is annotated " <> toName <> ", but is " <> article fromName <> ": " <> consequence)
+                    fmap catMaybes . sequence $
+                        [ narrowing conn catalogue from to <&> fmap \(fromName, toName, consequence) ->
+                            Finding Narrowing (Text.pack name) ("column " <> show i <> " (" <> name <> ") is annotated " <> toName <> ", but is " <> article fromName <> ": " <> consequence)
                         | length found == length types
                         , (i :: Int, (name, from), Just to) <- zip3 [1 ..] found expected
-                        , Just (fromName, toName, consequence) <- [lossy (baseType catalogue from) (baseType catalogue to)]
                         ]
             )
                 `finally` query conn "DEALLOCATE hasql_check_types_columns"
@@ -140,15 +139,38 @@ checkColumns conn catalogue types stmt = do
             _ -> pure Nothing
 
 
+-- | 'lossy', through domains, and through arrays element by element, as
+-- Postgres converts them: a bigint[] read as integer[] may overflow.
+narrowing :: Pqi.Connection -> Catalogue -> Word32 -> Word32 -> IO (Maybe (String, String, String))
+narrowing conn catalogue from to =
+    query
+        conn
+        ( ByteString.Char8.pack
+            ( concat
+                [ "SELECT f.typelem::text, t.typelem::text FROM pg_catalog.pg_type f, pg_catalog.pg_type t WHERE f.oid = "
+                , show from'
+                , " AND t.oid = "
+                , show to'
+                , " AND f.typcategory = 'A' AND t.typcategory = 'A'"
+                ]
+            )
+        )
+        >>= \case
+            Right [[Just f, Just t]]
+                | Just f' <- readMaybe (ByteString.Char8.unpack f)
+                , Just t' <- readMaybe (ByteString.Char8.unpack t) ->
+                    fmap (\(fromName, toName, consequence) -> (fromName <> "[]", toName <> "[]", consequence)) <$> narrowing conn catalogue f' t'
+            _ -> pure (lossy from' to')
+  where
+    from' = baseType catalogue from
+    to' = baseType catalogue to
+
+
 data Described = Described
     { params :: [Word32]
     , columns :: [(String, Word32, Bool)]
     -- ^ Name, type, and whether it is a table column rather than an expression.
     }
-
-
-(<&&>) :: Maybe a -> (a -> b) -> Maybe b
-(<&&>) = flip fmap
 
 
 zip4 :: [a] -> [b] -> [c] -> [d] -> [(a, b, c, d)]
