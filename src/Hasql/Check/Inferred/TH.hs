@@ -35,7 +35,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Hasql.Check (parsePlainStmt, renderStmt)
-import Hasql.Check.Annotate (Slot (..), annotate, placeholder)
+import Hasql.Check.Annotate (annotate, placeholder)
 import Hasql.Check.Inferred (Piece (..), Template (..), Wrapped (..), resultless, statement)
 import Hasql.Decoders qualified as D
 import Language.Haskell.TH (Exp, Q)
@@ -74,7 +74,7 @@ template sql = do
     let plain = Text.toLower (Text.decodeUtf8Lenient (renderStmt stmt))
         unused base = until (not . (`Text.isInfixOf` plain)) (<> "_") base
         prefix = unused "hasql_check_slot_"
-        annotated = annotate (\case Param n -> Just (placeholder (prefix <> Text.pack (show n))); Column _ -> Nothing) stmt
+        annotated = annotate (\n -> Just (placeholder (prefix <> Text.pack (show n)))) stmt
         cut = cutWith prefix
     pure
         Template
@@ -94,13 +94,25 @@ template sql = do
 -- | The statement's own WITH list, and the rest of it.
 splitWith :: Ast.PreparableStmt -> Maybe (Maybe Ast.WithClause, Ast.PreparableStmt)
 splitWith = \case
+    -- "(WITH ... SELECT ...)" is a parenthesised select clause.
+    Ast.SelectPreparableStmt (Ast.NoParensSelectStmt (Ast.SelectNoParens Nothing (Ast.WithParensSelectClause p) s l f)) ->
+        let (w, p') = inParens p
+         in Just (w, Ast.SelectPreparableStmt (Ast.NoParensSelectStmt (Ast.SelectNoParens Nothing (Ast.WithParensSelectClause p') s l f)))
     Ast.SelectPreparableStmt (Ast.NoParensSelectStmt (Ast.SelectNoParens w c s l f)) ->
         Just (w, Ast.SelectPreparableStmt (Ast.NoParensSelectStmt (Ast.SelectNoParens Nothing c s l f)))
-    stmt@(Ast.SelectPreparableStmt (Ast.WithParensSelectStmt _)) -> Just (Nothing, stmt)
+    Ast.SelectPreparableStmt (Ast.WithParensSelectStmt s) -> Just (Ast.SelectPreparableStmt . Ast.WithParensSelectStmt <$> inParens s)
     Ast.InsertPreparableStmt (Ast.InsertStmt w a b c d) -> Just (w, Ast.InsertPreparableStmt (Ast.InsertStmt Nothing a b c d))
     Ast.UpdatePreparableStmt (Ast.UpdateStmt w a b c d e) -> Just (w, Ast.UpdatePreparableStmt (Ast.UpdateStmt Nothing a b c d e))
     Ast.DeletePreparableStmt (Ast.DeleteStmt w a b c d) -> Just (w, Ast.DeletePreparableStmt (Ast.DeleteStmt Nothing a b c d))
     Ast.CallPreparableStmt _ -> Nothing
+
+
+-- | A parenthesised SELECT's WITH list, and the rest of it: the list can go
+-- outside the parentheses, and must, if it has a data-modifying statement.
+inParens :: Ast.SelectWithParens -> (Maybe Ast.WithClause, Ast.SelectWithParens)
+inParens = \case
+    Ast.NoParensSelectWithParens (Ast.SelectNoParens w c s l f) -> (w, Ast.NoParensSelectWithParens (Ast.SelectNoParens Nothing c s l f))
+    Ast.WithParensSelectWithParens s -> Ast.WithParensSelectWithParens <$> inParens s
 
 
 cutWith :: Text -> Text -> [Piece]

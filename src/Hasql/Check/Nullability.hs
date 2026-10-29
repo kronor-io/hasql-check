@@ -35,6 +35,7 @@ module Hasql.Check.Nullability (
     strip,
     query,
     check,
+    checkColumns,
     resultQuoters,
 ) where
 
@@ -439,10 +440,23 @@ check conn catalogue stmt = map toFinding <$> warningsFor conn catalogue stmt
     toFinding w = Finding{rule = Nullable, subject = w.columnName, message = describe w}
 
 
+-- | 'check', for a statement whose result columns are not annotated, given
+-- whether each may be NULL: one of "Hasql.Check.Inferred.TH", whose Haskell
+-- types say so. Its columns may be behind a @*@.
+checkColumns :: Pqi.Connection -> Catalogue -> [Bool] -> Ast.PreparableStmt -> IO [Finding]
+checkColumns conn catalogue nullables stmt =
+    map toFinding <$> warningsWith conn catalogue stmt ([Annotation (Just n) Nothing | n <- nullables], stmt)
+  where
+    toFinding w = Finding{rule = Nullable, subject = w.columnName, message = describe w}
+
+
 warningsFor :: Pqi.Connection -> Catalogue -> Ast.PreparableStmt -> IO [Warning]
-warningsFor conn catalogue stmt = case strip stmt of
-    Nothing -> pure []
-    Just (annotations, stripped) -> do
+warningsFor conn catalogue stmt = maybe (pure []) (warningsWith conn catalogue stmt) (strip stmt)
+
+
+warningsWith :: Pqi.Connection -> Catalogue -> Ast.PreparableStmt -> ([Annotation], Ast.PreparableStmt) -> IO [Warning]
+warningsWith conn catalogue stmt = \case
+    (annotations, stripped) -> do
         prepared <- conn.prepare statementName (renderStmt stripped) Nothing
         status <- maybe (pure Pqi.FatalError) (.resultStatus) prepared
         if status /= Pqi.CommandOk

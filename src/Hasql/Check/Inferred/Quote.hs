@@ -18,6 +18,7 @@ module Hasql.Check.Inferred.Quote (
     Column (..),
     readInferred,
     annotated,
+    columns,
     checkSent,
 ) where
 
@@ -31,7 +32,6 @@ import Data.Text.Encoding qualified as Text
 import Data.Word (Word32)
 import Hasql.Check (parsePlainStmt, quoterSettings)
 import Hasql.Check.Annotate (annotate, typename)
-import Hasql.Check.Annotate qualified as Slot
 import Hasql.Check.Inferred (Piece (..), Template (..), render)
 import Hasql.Check.Inferred.TH (template)
 import Hasql.Check.Nullability (query)
@@ -87,21 +87,23 @@ readInferred contents =
         [(n, l) | (n :: Int, l) <- zip [1 ..] (ByteString.Char8.lines contents), not (ByteString.Char8.null l)]
 
 
--- | The hasql-th quote the inferred one stands for.
+-- | The statement with its parameters annotated, as a hasql-th quote: its
+-- result columns are cast around it, which the warnings see through
+-- 'columns'.
 annotated :: Inferred -> Either String Text
 annotated q = do
     stmt <- parsePlainStmt False q.sql
-    params <- traverse column q.params
-    row <- traverse (traverse column) q.row
-    let slot = \case
-            Slot.Param n -> at n params
-            Slot.Column n -> at n =<< row
-        at n xs = case drop (n - 1) xs of
+    params <- traverse (\c -> typename c.postgres c.nullable) q.params
+    let param n = case drop (n - 1) params of
             t : _ | n >= 1 -> Just t
             _ -> Nothing
-    pure (Ast.toText quoterSettings (annotate slot stmt))
-  where
-    column c = typename c.postgres c.nullable
+    pure (Ast.toText quoterSettings (annotate param stmt))
+
+
+-- | The Postgres type each result column is read as, and whether it may be
+-- NULL.
+columns :: Inferred -> Maybe [(Text, Bool)]
+columns q = either (const Nothing) Just . traverse postgresType =<< q.row
 
 
 postgresType :: Column -> Either String (Text, Bool)
@@ -146,20 +148,20 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                                        ]
                         columnErrors <- case (row, t.wrapped) of
                             (Nothing, _) -> pure []
-                            (Just columns, _)
-                                | length found /= length columns ->
-                                    pure ["the statement returns " <> count "column" (length found) <> ", but the Haskell type reads " <> show (length columns)]
+                            (Just readAs, _)
+                                | length found /= length readAs ->
+                                    pure ["the statement returns " <> count "column" (length found) <> ", but the Haskell type reads " <> show (length readAs)]
                             -- A CALL cannot be wrapped, so its columns are not
                             -- cast: they must already be of the types read.
-                            (Just columns, Nothing) -> do
-                                expected <- traverse (oid . fst) columns
+                            (Just readAs, Nothing) -> do
+                                expected <- traverse (oid . fst) readAs
                                 sequence
                                     [ (\pg -> "column " <> show i <> " (" <> name <> ") is " <> pg <> ", but is read as " <> Text.unpack c.haskellType) <$> nameOf found'
                                     | (i :: Int, c, (name, found'), Just e) <- zip4 [1 ..] (concat q.row) found expected
                                     , found' /= e
                                     ]
-                            (Just columns, Just _) -> do
-                                expected <- traverse (oid . fst) columns
+                            (Just readAs, Just _) -> do
+                                expected <- traverse (oid . fst) readAs
                                 fmap concat . sequence $
                                     [ conversionError i name c found' e
                                     | (i :: Int, c, (name, found'), Just e) <- zip4 [1 ..] (concat q.row) found expected

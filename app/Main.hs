@@ -19,6 +19,7 @@ import Data.Text.Encoding qualified
 import Hasql.Check
 import Hasql.Check.Finding
 import Hasql.Check.Inferred.Quote (Inferred (..), annotated, checkSent, readInferred)
+import Hasql.Check.Inferred.Quote qualified as Inferred
 import Hasql.Check.Lexer
 import Hasql.Check.Nullability qualified as Nullability
 import Hasql.Check.Parser
@@ -264,11 +265,13 @@ inHaskellTerms m =
 
 -- | Whether a quote found in a source file is one --inferred has: its
 -- quoter has the same names as hasql-th's. The paths may be relative to
--- different directories, so one need only end with the other.
+-- different directories, so one need only end with the other; and the quote
+-- must be the same, so that one in another package with the same path is
+-- still checked.
 isInferred :: [(FilePath, Either String [(QuasiQuote, Maybe Inferred)])] -> (FilePath, QuasiQuote) -> Bool
-isInferred inferredQuotes (file, QuasiQuote (AlexPn _ line column, _) _) =
+isInferred inferredQuotes (file, QuasiQuote (AlexPn _ line column, _) (_, sql)) =
     or
-        [ q.line == line && q.column == column && sameFile q.file
+        [ q.line == line && q.column == column && q.sql == sql && sameFile q.file
         | (_, Right quotes) <- inferredQuotes
         , (_, Just q) <- quotes
         ]
@@ -332,8 +335,18 @@ main = do
                                         let checkedRules =
                                                 [Nullable | opts.nullability && isQuoterIn Nullability.resultQuoters quoter]
                                                     <> [Narrowing | opts.types]
-                                        nullable <- if Nullable `elem` checkedRules then Nullability.check libPqConn cat ast else pure []
-                                        narrowing <- if opts.types then Types.check libPqConn cat ast else pure []
+                                        -- An inferred quote's result columns are cast
+                                        -- around it, not annotated: their types and
+                                        -- nullability come from the Haskell types.
+                                        let inferredColumns = Inferred.columns =<< inferredQuote
+                                            checkNullable = case inferredQuote of
+                                                Just _ -> maybe (pure []) (\cs -> Nullability.checkColumns libPqConn cat (map snd cs) ast) inferredColumns
+                                                Nothing -> Nullability.check libPqConn cat ast
+                                            checkTypes = case inferredQuote of
+                                                Just _ -> (<>) <$> Types.check libPqConn cat ast <*> maybe (pure []) (\cs -> Types.checkColumns libPqConn cat (map fst cs) ast) inferredColumns
+                                                Nothing -> Types.check libPqConn cat ast
+                                        nullable <- if Nullable `elem` checkedRules then checkNullable else pure []
+                                        narrowing <- if opts.types then checkTypes else pure []
                                         let h = statementHash (renderStmt ast)
                                             (kept, messages) = settle checkedRules (directivesAbove fileLines line) baseline h (nullable <> narrowing)
                                         when (not (null messages)) do
