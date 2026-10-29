@@ -32,12 +32,19 @@ module Hasql.Check.Inferred (
     Value (..),
     typeName,
     Domain (..),
+    PgEnum (..),
+    GEnum (..),
     Column (..),
     Params (..),
     Row (..),
 
     -- * Postgres types at the type level
     PgColumnType,
+    PgColumnLabels,
+    PgParamLabels,
+    PgColumnLabelLists,
+    PostgresParamLabels,
+    PostgresColumnLabels,
     PgParamTypes,
     PgColumnTypes,
     KnownSymbols (..),
@@ -65,6 +72,7 @@ import Data.Text qualified as Text
 import Data.Time (Day, LocalTime, TimeOfDay, UTCTime)
 import Data.UUID (UUID)
 import Data.Vector (Vector)
+import GHC.Generics (C1, D1, Generic (..), M1 (..), Meta (..), U1 (..), (:+:) (..))
 import GHC.TypeLits (AppendSymbol, KnownSymbol, Symbol, symbolVal)
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
@@ -84,6 +92,13 @@ class Value a where
     -- | The Postgres type's name, as an annotation would give it: @"int8"@,
     -- @"public.payment_state"@.
     type PgType a :: Symbol
+
+
+    -- | The labels of the Postgres enum it is, if it is one, for the checker.
+    type PgLabels a :: [Symbol]
+
+
+    type PgLabels a = '[]
 
 
     encodeValue :: E.Value a
@@ -195,14 +210,77 @@ newtype Domain (name :: Symbol) a = Domain a
 
 instance Value a => Value (Domain name a) where
     type PgType (Domain name a) = name
+    type PgLabels (Domain name a) = PgLabels a
     encodeValue = (\(Domain a) -> a) >$< encodeValue
     decodeValue = Domain <$> decodeValue
+
+
+-- | A Haskell enumeration sent and read as a Postgres enum, by the enum's
+-- name: each constructor, which takes no fields, as the label of the same
+-- name.
+--
+-- > data PaymentState = PENDING | PAID
+-- >     deriving stock (Generic)
+-- >     deriving (Value) via PgEnum "payment_state" PaymentState
+--
+-- The checker compares the labels with the enum's in the database.
+newtype PgEnum (name :: Symbol) a = PgEnum a
+
+
+instance (KnownSymbol name, Generic a, GEnum (Rep a)) => Value (PgEnum name a) where
+    type PgType (PgEnum name a) = name
+    type PgLabels (PgEnum name a) = ConstructorNames (Rep a)
+    encodeValue = uncurry E.enum (qualifiedName (Text.pack (symbolVal (Proxy @name)))) (\(PgEnum a) -> glabel (from a))
+    decodeValue = uncurry D.enum (qualifiedName (Text.pack (symbolVal (Proxy @name)))) (\t -> PgEnum . to <$> lookup t gvalues)
+
+
+-- | A type's schema, if its name has one, and its own name.
+qualifiedName :: Text -> (Maybe Text, Text)
+qualifiedName n = case Text.breakOn "." n of
+    (own, "") -> (Nothing, own)
+    (schema, rest) -> (Just schema, Text.drop 1 rest)
+
+
+-- | The constructors of an enumeration, by name.
+class GEnum f where
+    gvalues :: [(Text, f p)]
+    glabel :: f p -> Text
+
+
+instance GEnum f => GEnum (D1 m f) where
+    gvalues = [(l, M1 x) | (l, x) <- gvalues]
+    glabel (M1 x) = glabel x
+
+
+instance (GEnum f, GEnum g) => GEnum (f :+: g) where
+    gvalues = [(l, L1 x) | (l, x) <- gvalues] <> [(l, R1 x) | (l, x) <- gvalues]
+    glabel = \case
+        L1 x -> glabel x
+        R1 x -> glabel x
+
+
+instance KnownSymbol label => GEnum (C1 ('MetaCons label fixity strict) U1) where
+    gvalues = [(Text.pack (symbolVal (Proxy @label)), M1 U1)]
+    glabel _ = Text.pack (symbolVal (Proxy @label))
+
+
+-- | An enumeration's constructor names.
+type family ConstructorNames (f :: Type -> Type) :: [Symbol] where
+    ConstructorNames (D1 m f) = ConstructorNames f
+    ConstructorNames (f :+: g) = Append (ConstructorNames f) (ConstructorNames g)
+    ConstructorNames (C1 ('MetaCons label fixity strict) U1) = '[label]
+
+
+type family Append (xs :: [k]) (ys :: [k]) :: [k] where
+    Append '[] ys = ys
+    Append (x ': xs) ys = x ': Append xs ys
 
 
 -- | A one-dimensional array, whose elements may be NULL when they are
 -- 'Maybe's: a @Vector Int64@ is an @int8[]@.
 instance Column a => Value (Vector a) where
     type PgType (Vector a) = AppendSymbol (PgColumnType a) "[]"
+    type PgLabels (Vector a) = PgColumnLabels a
     encodeValue = E.foldableArray encodeColumn
     decodeValue = D.vectorArray decodeColumn
 
@@ -211,6 +289,7 @@ instance Column a => Value (Vector a) where
 -- Postgres type; use 'Text'.
 instance Column a => Value [a] where
     type PgType [a] = AppendSymbol (PgColumnType a) "[]"
+    type PgLabels [a] = PgColumnLabels a
     encodeValue = E.foldableArray encodeColumn
     decodeValue = D.listArray decodeColumn
 
@@ -229,6 +308,12 @@ instance {-# OVERLAPPABLE #-} Value a => Column a where
 instance Value a => Column (Maybe a) where
     encodeColumn = E.nullable encodeValue
     decodeColumn = D.nullable decodeValue
+
+
+-- | A column's enum labels, if it is one.
+type family PgColumnLabels (a :: Type) :: [Symbol] where
+    PgColumnLabels (Maybe a) = PgLabels a
+    PgColumnLabels a = PgLabels a
 
 
 -- | A column's Postgres type.
@@ -326,6 +411,19 @@ type family PgParamTypes (p :: Type) :: [Symbol] where
     PgParamTypes a = '[PgColumnType a]
 
 
+-- | The enum labels of a statement's parameters, one list each.
+type family PgParamLabels (p :: Type) :: [[Symbol]] where
+    PgParamLabels () = '[]
+    PgParamLabels (a, b) = '[PgColumnLabels a, PgColumnLabels b]
+    PgParamLabels (a, b, c) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c]
+    PgParamLabels (a, b, c, d) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d]
+    PgParamLabels (a, b, c, d, e) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e]
+    PgParamLabels (a, b, c, d, e, f) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f]
+    PgParamLabels (a, b, c, d, e, f, g) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g]
+    PgParamLabels (a, b, c, d, e, f, g, h) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h]
+    PgParamLabels a = '[PgColumnLabels a]
+
+
 -- | A result row: one column, or a tuple of them.
 class Row a where
     row :: D.Row a
@@ -375,6 +473,18 @@ type family PgColumnTypes (r :: Type) :: [Symbol] where
     PgColumnTypes a = '[PgColumnType a]
 
 
+-- | The enum labels of a statement's result columns, one list each.
+type family PgColumnLabelLists (r :: Type) :: [[Symbol]] where
+    PgColumnLabelLists (a, b) = '[PgColumnLabels a, PgColumnLabels b]
+    PgColumnLabelLists (a, b, c) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c]
+    PgColumnLabelLists (a, b, c, d) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d]
+    PgColumnLabelLists (a, b, c, d, e) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e]
+    PgColumnLabelLists (a, b, c, d, e, f) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f]
+    PgColumnLabelLists (a, b, c, d, e, f, g) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h]
+    PgColumnLabelLists a = '[PgColumnLabels a]
+
+
 -- | Type-level names, as text.
 class KnownSymbols (ss :: [Symbol]) where
     symbolTexts :: [Text]
@@ -403,6 +513,21 @@ class KnownSymbols cs => PostgresColumns cs
 
 
 instance KnownSymbols cs => PostgresColumns cs
+
+
+-- | The enum labels of a statement's parameters, as GHC worked them out where
+-- it is used, for @hasql-check-hie@ to find; see 'PostgresParams'.
+class PostgresParamLabels (ls :: [[Symbol]])
+
+
+instance PostgresParamLabels ls
+
+
+-- | The enum labels of a statement's result columns; see 'PostgresParams'.
+class PostgresColumnLabels (ls :: [[Symbol]])
+
+
+instance PostgresColumnLabels ls
 
 
 -- | A statement's text, as the quoter cut it.
@@ -473,8 +598,18 @@ render paramTypes' columnTypes' t = case (columnTypes', t.wrapped) of
 
 -- | A statement returning rows, given what to make of them.
 statement ::
-    forall p r a ps cs.
-    (Params p, Row r, ps ~ PgParamTypes p, cs ~ PgColumnTypes r, PostgresParams ps, PostgresColumns cs) =>
+    forall p r a ps cs pl cl.
+    ( Params p
+    , Row r
+    , ps ~ PgParamTypes p
+    , cs ~ PgColumnTypes r
+    , PostgresParams ps
+    , PostgresColumns cs
+    , pl ~ PgParamLabels p
+    , cl ~ PgColumnLabelLists r
+    , PostgresParamLabels pl
+    , PostgresColumnLabels cl
+    ) =>
     Template ->
     (D.Row r -> D.Result a) ->
     Statement p a
@@ -483,5 +618,9 @@ statement template result =
 
 
 -- | A statement returning no rows.
-resultless :: forall p ps. (Params p, ps ~ PgParamTypes p, PostgresParams ps) => Template -> Statement p ()
+resultless ::
+    forall p ps pl.
+    (Params p, ps ~ PgParamTypes p, PostgresParams ps, pl ~ PgParamLabels p, PostgresParamLabels pl) =>
+    Template ->
+    Statement p ()
 resultless template = Statement.preparable (render (symbolTexts @ps) [] template) params D.noResult

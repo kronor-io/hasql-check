@@ -6,7 +6,8 @@ Add `Hasql.Check.Inferred.TH`: quoters for statements without annotations,
 whose parameter and result types come from the Haskell types they are used
 at. Each type names its Postgres type at the type level, so a `newtype`
 deriving `Value`, or deriving it via `Domain`, is checked as such, and
-`Vector`s and lists are arrays. Add
+`Vector`s and lists are arrays, and an enumeration deriving it via `PgEnum`
+is an enum, whose labels the checker compares with the database's. Add
 `hasql-check-hie`, which reads those types from GHC's `.hie` files, and
 `--inferred`, which checks the statements it finds.
 

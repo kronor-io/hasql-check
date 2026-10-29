@@ -22,10 +22,11 @@ module Hasql.Check.Inferred.Quote (
     checkSent,
 ) where
 
-import Data.Aeson ((.:), (.:?))
+import Data.Aeson ((.!=), (.:), (.:?))
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as ByteString.Char8
+import Data.Functor ((<&>))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -59,6 +60,8 @@ data Column = Column
     { haskellType :: Text
     , postgres :: Text
     -- ^ As GHC worked it out from the Haskell type's 'Hasql.Check.Inferred.PgType'.
+    , labels :: [Text]
+    -- ^ The labels of the enum it is, if it is one.
     , nullable :: Bool
     }
 
@@ -76,7 +79,7 @@ instance Aeson.FromJSON Inferred where
 
 
 instance Aeson.FromJSON Column where
-    parseJSON = Aeson.withObject "column" \o -> Column <$> o .: "type" <*> o .: "postgres" <*> o .: "nullable"
+    parseJSON = Aeson.withObject "column" \o -> Column <$> o .: "type" <*> o .: "postgres" <*> (o .:? "labels" .!= []) <*> o .: "nullable"
 
 
 -- | Quotes, one JSON object a line.
@@ -172,8 +175,49 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                             if null (paramErrors <> columnErrors)
                                 then either pure (const []) <$> described (render (map fst params) (maybe [] (map fst) row) t) paramOids
                                 else pure []
-                        pure (paramErrors <> columnErrors <> sent)
+                        labelErrors <-
+                            if null (paramErrors <> columnErrors)
+                                then
+                                    (<>)
+                                        <$> (concat <$> traverse paramLabels (zip [1 ..] q.params))
+                                        <*> (concat <$> traverse columnLabels (zip3 [1 ..] (concat q.row) (map fst found)))
+                                else pure []
+                        pure (paramErrors <> columnErrors <> sent <> labelErrors)
   where
+    -- A label the database does not have fails to be sent; one the Haskell
+    -- type does not have fails to be read.
+    paramLabels (n :: Int, c) = labelsAgainst c \enum labels ->
+        [ concat ["parameter $", show n, " is sent as ", Text.unpack c.haskellType, ", with labels ", Text.unpack enum, " does not have: ", list missing]
+        | let missing = filter (`notElem` labels) c.labels
+        , not (null missing)
+        ]
+    columnLabels (i :: Int, c, name) = labelsAgainst c \enum labels ->
+        [ concat ["column ", show i, " (", name, ") is read as ", Text.unpack c.haskellType, ", which cannot read labels ", Text.unpack enum, " has: ", list missing]
+        | let missing = filter (`notElem` c.labels) labels
+        , not (null missing)
+        ]
+    labelsAgainst c compare'
+        | null c.labels = pure []
+        | otherwise =
+            enumLabels c.postgres <&> \case
+                Nothing -> [Text.unpack c.postgres <> " is sent and read as an enum, but is not one in the database"]
+                Just labels -> compare' c.postgres labels
+    list = Text.unpack . Text.intercalate ", "
+    -- An array's elements' labels, if it is an array of an enum.
+    enumLabels name =
+        query
+            conn
+            ( mconcat
+                [ "SELECT e.enumlabel FROM pg_catalog.pg_enum e WHERE e.enumtypid ="
+                , " (SELECT CASE WHEN typcategory = 'A' THEN typelem ELSE oid END FROM pg_catalog.pg_type WHERE oid = to_regtype("
+                , quoteLiteral name
+                , ")) ORDER BY e.enumsortorder"
+                ]
+            )
+            <&> \case
+                Right [] -> Nothing
+                Right rows -> Just [Text.decodeUtf8Lenient l | [Just l] <- rows]
+                Left _ -> Nothing
     described sql paramOids = do
         prepared <- conn.prepare "" (Text.encodeUtf8 sql) (Just paramOids)
         case prepared of

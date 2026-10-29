@@ -440,6 +440,27 @@ Each type's Postgres type is part of its `Value` instance, as the associated
 type `PgType`, so a type of your own needs nothing else to be checked.
 Deriving the instance needs `UndecidableInstances` in that module.
 
+An enumeration is sent and read as a Postgres enum, each constructor as the
+label of the same name:
+
+```haskell
+-- create type payment_state as enum ('PENDING', 'PAID', 'REFUNDED');
+
+data PaymentState = PENDING | PAID
+    deriving stock (Generic)
+    deriving (Value) via PgEnum "payment_state" PaymentState
+```
+
+The labels are part of the type too, so the checker compares them with the
+enum's, for the way each statement uses it: a label the Haskell type cannot
+read fails when the statement reads it, and one the database does not have
+fails when it is sent.
+
+```
+Error in src/Shop/Enums.hs:20:11
+column 1 (state) is read as Shop.Enums.PaymentState, which cannot read labels payment_state has: REFUNDED
+```
+
 ### Checking them
 
 The types are only known once GHC has type-checked the module, after the
@@ -564,8 +585,9 @@ The warnings go to stderr in GHC's format, rather than through GHC, so
   apart: `UNION`s, and `SELECT *`.
 - They need the plan, so a statement that reads a session setting the
   connection lacks is only partly checked; see [Running it in CI](#running-it-in-ci).
-- The quoters without annotations do not take enums or composite types
-  yet, nor arrays of more than one dimension. A `String` is not an array:
+- The quoters without annotations do not take composite types yet, nor
+  arrays of more than one dimension. An enum's labels are its constructors'
+  names; for others, write the `Value` instance, with its `PgLabels`. A `String` is not an array:
   use `Text`. A `CALL` cannot be
   wrapped, so its result columns must have exactly the types they are read
   as.

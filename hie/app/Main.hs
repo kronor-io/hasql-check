@@ -71,6 +71,8 @@ main = do
                         rows = [r | Con "Hasql.Check.Inferred" "Row" [r] <- here]
                         paramNames = [ns | Con "Hasql.Check.Inferred" "PostgresParams" [l] <- here, Just ns <- [symbols l]]
                         columnNames = [ns | Con "Hasql.Check.Inferred" "PostgresColumns" [l] <- here, Just ns <- [symbols l]]
+                        paramLabels = [ls | Con "Hasql.Check.Inferred" "PostgresParamLabels" [l] <- here, Just ls <- [labelLists l]]
+                        columnLabels = [ls | Con "Hasql.Check.Inferred" "PostgresColumnLabels" [l] <- here, Just ls <- [labelLists l]]
                         -- The enclosing declarations hold the same
                         -- dictionaries, but only the quote's own span starts
                         -- after "[quoter|".
@@ -80,8 +82,9 @@ main = do
                             (Just _, NotInferred) -> pure []
                             (Just q, Resolved p r)
                                 | Just names <- listToMaybe paramNames
-                                , Just row <- traverse (\r' -> (r',) <$> listToMaybe columnNames) r ->
-                                    [] <$ putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q (p, names) row)
+                                , Just labels <- listToMaybe paramLabels
+                                , Just row <- traverse (\r' -> (r',,) <$> listToMaybe columnNames <*> listToMaybe columnLabels) r ->
+                                    [] <$ putStrLn (output (hie_hs_file hf) (srcSpanStartLine s) q (p, names, labels) row)
                             (Just q, _) -> pure [unresolved (location q)]
                             (Nothing, _) -> pure []
                 )
@@ -103,7 +106,7 @@ main = do
 
 
 -- | One quote's line of output.
-output :: FilePath -> Int -> Quote -> (Ty, [String]) -> Maybe (Ty, [String]) -> String
+output :: FilePath -> Int -> Quote -> (Ty, [String], [[String]]) -> Maybe (Ty, [String], [[String]]) -> String
 output file line q params row =
     object
         [ ("file", string file)
@@ -111,27 +114,28 @@ output file line q params row =
         , ("column", show q.column)
         , ("quoter", string q.quoter)
         , ("sql", string q.body)
-        , ("params", uncurry (columns True) params)
-        , ("row", maybe "null" (uncurry (columns False)) row)
+        , ("params", columns True params)
+        , ("row", maybe "null" (columns False) row)
         ]
 
 
 -- | A parameter or row type, as the list of its columns, with the Postgres
--- type of each.
-columns :: Bool -> Ty -> [String] -> String
-columns isParams t names = list (zipWith column (split t) names)
+-- type of each, and the labels of each that is an enum.
+columns :: Bool -> (Ty, [String], [[String]]) -> String
+columns isParams (t, names, labels) = list (zipWith3 column (split t) names labels)
   where
     split = \case
         Con _ "Unit" [] | isParams -> []
         Con _ name args | take 5 name == "Tuple" -> args
         other -> [other]
-    column c postgres = case c of
-        Con _ "Maybe" [inner] -> one inner postgres True
-        _ -> one c postgres False
-    one c postgres nullable =
+    column c postgres ls = case c of
+        Con _ "Maybe" [inner] -> one inner postgres ls True
+        _ -> one c postgres ls False
+    one c postgres ls nullable =
         object
             [ ("type", string (qualified c))
             , ("postgres", string postgres)
+            , ("labels", list (map string ls))
             , ("nullable", if nullable then "true" else "false")
             ]
     qualified = \case
@@ -140,6 +144,14 @@ columns isParams t names = list (zipWith column (split t) names)
         Var -> "?"
     list xs = "[" <> intercalate "," xs <> "]"
     parenthesised name = if ' ' `elem` name then "(" <> name <> ")" else name
+
+
+-- | A type-level list of lists of strings.
+labelLists :: Ty -> Maybe [[String]]
+labelLists = \case
+    Con _ ":" [l, rest] -> (:) <$> symbols l <*> labelLists rest
+    Con _ "[]" [] -> Just []
+    _ -> Nothing
 
 
 -- | A type-level list of strings.

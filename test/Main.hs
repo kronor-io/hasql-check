@@ -16,7 +16,8 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text.Encoding
 import Data.Vector qualified as Vector
-import Hasql.Check.Inferred (Domain (..), Value, render)
+import GHC.Generics (Generic)
+import Hasql.Check.Inferred (Domain (..), PgEnum (..), Value, render)
 import Hasql.Check.Inferred.TH qualified as Inferred
 import Hasql.Check.Lexer (AlexPosn (..))
 import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
@@ -132,7 +133,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}')"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}'); create type payment_state as enum ('PENDING', 'PAID', 'REFUNDED'); create table payment (id int4 primary key, state payment_state not null); insert into payment values (1, 'PAID')"]
                 action conn
 
 
@@ -573,6 +574,11 @@ piecesSpec = do
         Inferred.template "select from where" `shouldSatisfy` isLeft
 
 
+data PaymentState = PENDING | PAID | REFUNDED
+    deriving stock (Eq, Show, Generic)
+    deriving (Value) via PgEnum "payment_state" PaymentState
+
+
 newtype Label = Label Text
     deriving stock (Eq, Show)
     deriving newtype (Value)
@@ -647,6 +653,14 @@ runtimeSpec = do
         runStatement conn [1, 2 :: Int64] [Inferred.vectorStatement|select id from tagged where id = any($1)|]
             `shouldReturn` Vector.fromList [1 :: Int64]
 
+    itWithOuter "reads an enum as a Haskell enumeration" \conn ->
+        runStatement conn (1 :: Int32) [Inferred.singletonStatement|select state from payment where id = $1|]
+            `shouldReturn` PAID
+
+    itWithOuter "sends a Haskell enumeration as an enum" \conn ->
+        runStatement conn PENDING [Inferred.singletonStatement|select count(*) from payment where state = $1|]
+            `shouldReturn` (0 :: Int64)
+
     itWithOuter "runs a statement without rows" \conn ->
         runStatement conn ("blue" :: Text, 2 :: Int64) [Inferred.resultlessStatement|insert into tag (label, id) values ($1, $2)|]
             `shouldReturn` ()
@@ -672,12 +686,14 @@ inferredQuote quoter sql params row =
             <> c.haskell
             <> "\",\"postgres\":\""
             <> c.postgres
-            <> "\",\"nullable\":"
+            <> "\",\"labels\":["
+            <> Text.intercalate "," ["\"" <> l <> "\"" | l <- c.labels]
+            <> "],\"nullable\":"
             <> (if c.nullable then "true" else "false")
             <> "}"
 
 
-data Column = Column {haskell :: Text, postgres :: Text, nullable :: Bool}
+data Column = Column {haskell :: Text, postgres :: Text, nullable :: Bool, labels :: [Text]}
 
 
 -- | The same column, as a 'Maybe'.
@@ -696,9 +712,9 @@ runInferred conn args quotes' =
 
 
 int32, int64, text :: Column
-int32 = Column "GHC.Internal.Int.Int32" "int4" False
-int64 = Column "GHC.Internal.Int.Int64" "int8" False
-text = Column "Data.Text.Internal.Text" "text" False
+int32 = Column "GHC.Internal.Int.Int32" "int4" False []
+int64 = Column "GHC.Internal.Int.Int64" "int8" False []
+text = Column "Data.Text.Internal.Text" "text" False []
 
 
 inferredSpec :: TestDef '[Text] ()
@@ -795,29 +811,47 @@ inferredSpec = do
         out `shouldSatisfy` ("the statement uses $1, but the Haskell type sends 0 parameters" `isInfixOf`)
 
     itWithOuter "accepts a column of a domain, read as a newtype deriving it" \conn ->
-        runInferred conn [] [inferredQuote "singletonStatement" "select price from ledger" [] (Just [Column "Shop.Cents" "cents" True])]
+        runInferred conn [] [inferredQuote "singletonStatement" "select price from ledger" [] (Just [Column "Shop.Cents" "cents" True []])]
             `shouldReturn` (ExitSuccess, "")
 
     itWithOuter "rejects a column Postgres converts to the type read only when told to" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "vectorStatement" "select name from account" [] (Just [Column "Shop.Nickname" "int8" False])]
+        (code, out) <- runInferred conn [] [inferredQuote "vectorStatement" "select name from account" [] (Just [Column "Shop.Nickname" "int8" False []])]
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("column 1 (name) is text, but is read as Shop.Nickname (bigint), which Postgres converts it to only when told to" `isInfixOf`)
 
     itWithOuter "accepts an array whose elements Postgres converts on its own" \conn ->
-        runInferred conn [] [inferredQuote "singletonStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" True])]
+        runInferred conn [] [inferredQuote "singletonStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" True []])]
             `shouldReturn` (ExitSuccess, "")
 
     itWithOuter "rejects an array whose elements Postgres converts only when told to" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select labels from tagged" [] (Just [Column "Data.Vector.Vector Int64" "int8[]" False])]
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select labels from tagged" [] (Just [Column "Data.Vector.Vector Int64" "int8[]" False []])]
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("column 1 (labels) is text[], but is read as Data.Vector.Vector Int64 (bigint[]), which Postgres converts it to only when told to" `isInfixOf`)
 
     itWithOuter "warns about a nullable array read without a Maybe" \conn -> do
-        (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False])]
+        (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False []])]
         out `shouldSatisfy` ("column 1 (scores) is not a Maybe in Haskell, but public.tagged.scores is nullable" `isInfixOf`)
 
+    itWithOuter "accepts an enum read with all its labels" \conn ->
+        runInferred conn [] [inferredQuote "singletonStatement" "select state from payment" [] (Just [Column "Shop.State" "payment_state" False ["PENDING", "PAID", "REFUNDED"]])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects an enum read without a label the database has" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select state from payment" [] (Just [Column "Shop.State" "payment_state" False ["PENDING", "PAID"]])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("column 1 (state) is read as Shop.State, which cannot read labels payment_state has: REFUNDED" `isInfixOf`)
+
+    itWithOuter "accepts an enum sent with fewer labels than the database has" \conn ->
+        runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID"]] Nothing]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects an enum sent with a label the database does not have" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID", "CANCELLED"]] Nothing]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("parameter $1 is sent as Shop.Transition, with labels payment_state does not have: CANCELLED" `isInfixOf`)
+
     itWithOuter "rejects a Postgres type the database does not have" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False])]
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False []])]
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("type \"nosuchtype\" does not exist" `isInfixOf`)
 
