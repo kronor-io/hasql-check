@@ -21,8 +21,6 @@
 --
 -- The .hie format changes with each GHC release: build this with the GHC the
 -- project is built with.
-{-# LANGUAGE CPP #-}
-
 module Main where
 
 import Control.Monad (unless)
@@ -37,11 +35,7 @@ import GHC.Iface.Ext.Types
 import GHC.Iface.Ext.Utils (recoverFullType)
 import GHC.Iface.Type (IfaceTyCon (..), IfaceTyLit (..))
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
-#if MIN_VERSION_ghc(9, 14, 0)
-import GHC.Types.Name.Cache (newNameCache)
-#else
 import GHC.Types.Name.Cache (initNameCache)
-#endif
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (srcSpanEndCol, srcSpanEndLine, srcSpanStartCol, srcSpanStartLine)
 import GHC.Unit.Module (moduleName, moduleNameString)
@@ -55,12 +49,7 @@ import Text.Printf (printf)
 main :: IO ()
 main = do
     files <- getArgs
-    -- 9.14 took the arguments away: it seeds the cache itself.
-#if MIN_VERSION_ghc(9, 14, 0)
-    nc <- newNameCache
-#else
     nc <- initNameCache 'z' []
-#endif
     errors <- concat <$> mapM (dump nc) files
     mapM_ (hPutStrLn stderr) errors
     unless (null errors) exitFailure

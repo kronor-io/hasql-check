@@ -140,8 +140,8 @@ library
     cpp-options: -DKRONOR_SYNTAX
 
   build-tool-depends:
-    , alex:alex   >=3.2  && <4
-    , happy:happy >=1.20 && <3
+    , alex:alex    >=3.2  && <4
+    , happy:happy  >=1.20 && <3
 
 executable hasql-check
   main-is:            Main.hs
