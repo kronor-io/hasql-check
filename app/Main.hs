@@ -347,7 +347,12 @@ main = do
                                                 Nothing -> Types.check libPqConn cat ast
                                         nullable <- if Nullable `elem` checkedRules then checkNullable else pure []
                                         narrowing <- if opts.types then checkTypes else pure []
-                                        let h = statementHash (renderStmt ast)
+                                        -- An inferred statement by what it sends,
+                                        -- its result types too: reading a column
+                                        -- as another type is another statement.
+                                        let h = case Inferred.sent <$> inferredQuote of
+                                                Just (Right sql) -> statementHash (Data.Text.Encoding.encodeUtf8 sql)
+                                                _ -> statementHash (renderStmt ast)
                                             (kept, messages) = settle checkedRules (directivesAbove fileLines line) baseline h (nullable <> narrowing)
                                         when (not (null messages)) do
                                             putStrLn ("Warning in " <> location file qq)
