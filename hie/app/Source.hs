@@ -16,11 +16,14 @@ module Source (
     quoteAt,
     Types (..),
     typesOf,
+    Ty (..),
+    ground,
+    columnTypes,
     charIndex,
     ghcColumn,
 ) where
 
-import Data.Char (isAlphaNum)
+import Data.Char (isAlphaNum, isDigit)
 import Data.List (intercalate)
 
 
@@ -115,3 +118,46 @@ advance :: Int -> Char -> Int
 advance c = \case
     '\t' -> ((c - 1) `div` 8 + 1) * 8 + 1
     _ -> c + 1
+
+
+-- | A type: a constructor applied to its visible arguments, by module and
+-- name; a string literal, which names a Postgres type or label; another
+-- literal; or something not concrete.
+data Ty = Con String String [Ty] | Lit String | OtherLit String | Var
+    deriving stock (Eq, Show)
+
+
+-- | Whether a type is concrete.
+ground :: Ty -> Bool
+ground = \case
+    Var -> False
+    Lit _ -> True
+    OtherLit _ -> True
+    Con _ _ args -> all ground args
+
+
+-- | A parameter or row type's columns, each with whether it is a 'Maybe':
+-- a tuple's elements, none for unit as parameters, or the type itself.
+columnTypes :: Bool -> Ty -> [(Ty, Bool)]
+columnTypes isParams t = map column (split t)
+  where
+    split = \case
+        Con m "Unit" [] | isParams, m `elem` tupleModules -> []
+        Con m name args | m `elem` tupleModules, isTuple name -> args
+        other -> [other]
+    column = \case
+        Con m "Maybe" [inner] | m `elem` maybeModules -> (inner, True)
+        other -> (other, False)
+
+
+-- | Where GHC defines tuples and unit, and Maybe: a type of the same name
+-- elsewhere, a newtype TupleId say, is a type of its own.
+tupleModules, maybeModules :: [String]
+tupleModules = ["GHC.Tuple", "GHC.Tuple.Prim"]
+maybeModules = ["GHC.Internal.Maybe", "GHC.Maybe"]
+
+
+isTuple :: String -> Bool
+isTuple name = case splitAt 5 name of
+    ("Tuple", n) -> not (null n) && all isDigit n
+    _ -> False

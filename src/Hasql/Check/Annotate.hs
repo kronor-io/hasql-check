@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 -- |
 -- Module      : Hasql.Check.Annotate
 -- Copyright   : (c) 2026 Kronor.io
@@ -19,9 +21,11 @@ module Hasql.Check.Annotate (
     annotate,
     typename,
     placeholder,
+    untypedLiterals,
 ) where
 
 import Data.Data (Data, cast, gmapT)
+import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import PostgresqlSyntax qualified as Ast
@@ -54,3 +58,55 @@ annotate param = go
         _ -> case cast x of
             Just (Ast.CExprBExpr p@(Ast.ParamCExpr n Nothing)) | Just t <- param n, Just r <- cast (Ast.TypecastBExpr (Ast.CExprBExpr p) t) -> r
             _ -> gmapT go x
+
+
+-- | The result columns, counting from 1, that are a string literal or NULL
+-- with no type of its own, and the literal: Postgres reads one as the type
+-- it is cast to, so whether the quoter's cast works depends only on the
+-- literal. Only a plain SELECT's columns are found.
+untypedLiterals :: Ast.PreparableStmt -> [(Int, Text)]
+untypedLiterals = \case
+    Ast.SelectPreparableStmt (Ast.NoParensSelectStmt (Ast.SelectNoParens _ (Ast.SimpleSelectSelectClause (Ast.NormalSimpleSelect (Just t) _ _ _ _ _ _)) _ _ _)) ->
+        [(n, Ast.toText mempty e) | (n, Just e) <- zip [1 ..] (targeting t), untyped e]
+    _ -> []
+  where
+    targeting = \case
+        Ast.NormalTargeting l -> normalTargets l
+        Ast.AllTargeting (Just l) -> targets l
+        Ast.DistinctTargeting _ l -> targets l
+        Ast.AllTargeting Nothing -> []
+    untyped = \case
+        Ast.CExprAExpr (Ast.AexprConstCExpr (Ast.SAexprConst _)) -> True
+        Ast.CExprAExpr (Ast.AexprConstCExpr Ast.NullAexprConst) -> True
+        _ -> False
+
+
+-- | Each target's expression; nothing for a @*@, which stops the counting.
+targets :: Ast.TargetList -> [Maybe Ast.AExpr]
+targets (Ast.TargetList els) = takeWhile (/= Nothing) (map expr (toList els))
+  where
+    expr = \case
+        Ast.AliasedExprTargetEl a _ -> Just a
+        Ast.ImplicitlyAliasedExprTargetEl a _ -> Just a
+        Ast.ExprTargetEl a -> Just a
+        Ast.AsteriskTargetEl -> Nothing
+
+#ifdef KRONOR_SYNTAX
+
+normalTargets :: Ast.HsTargetList -> [Maybe Ast.AExpr]
+normalTargets (Ast.HsTargetList els) = takeWhile (/= Nothing) (map one (toList els))
+  where
+    one = \case
+        Ast.SqlTargetEl te -> case te of
+            Ast.AliasedExprTargetEl a _ -> Just a
+            Ast.ImplicitlyAliasedExprTargetEl a _ -> Just a
+            Ast.ExprTargetEl a -> Just a
+            Ast.AsteriskTargetEl -> Nothing
+        _ -> Nothing
+
+#else
+
+normalTargets :: Ast.TargetList -> [Maybe Ast.AExpr]
+normalTargets = targets
+
+#endif

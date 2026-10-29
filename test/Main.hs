@@ -132,7 +132,7 @@ withPostgres action =
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--log", dir </> "postgres.log", "--options", "-k " <> dir <> " -c listen_addresses=''", "--wait", "--silent", "start"])
             (callProcess "pg_ctl" ["--pgdata", dataDir, "--mode", "immediate", "--silent", "stop"])
             do
-                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}')"]
+                callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create domain positive_cents as cents check (value > 0); create table wallet (balance positive_cents not null); create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}')"]
                 action conn
 
 
@@ -815,11 +815,46 @@ inferredSpec = do
     itWithOuter "warns about a nullable array read without a Maybe" \conn -> do
         (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False])]
         out `shouldSatisfy` ("column 1 (scores) is not a Maybe in Haskell, but public.tagged.scores is nullable" `isInfixOf`)
+    itWithOuter "accepts NULL and string literals, typed by the cast" \conn ->
+        runInferred
+            conn
+            []
+            [ inferredQuote "singletonStatement" "select NULL" [] (Just [Column "GHC.Internal.Int.Int64" "int8" True])
+            , inferredQuote "singletonStatement" "select '2026-10-29'" [] (Just [Column "Data.Time.Calendar.Days.Day" "date" False])
+            ]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects a string literal that is not of the type read" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 'abc'" [] (Just [Column "Data.UUID.Types.Internal.UUID" "uuid" False])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("column 1 (?column?) is 'abc', which cannot be read as Data.UUID.Types.Internal.UUID" `isInfixOf`)
+
+    itWithOuter "accepts any column read as text, which Postgres converts to on assignment" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select id from account" [] (Just [text])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a domain over a domain, read as the type at the bottom" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select balance from wallet" [] (Just [Column "Shop.Positive" "positive_cents" False])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "accepts a domain column behind a *" \conn ->
+        runInferred conn [] [inferredQuote "vectorStatement" "select x.* from (select price from ledger) x" [] (Just [Column "Shop.Cents" "cents" True])]
+            `shouldReturn` (ExitSuccess, "")
+
+    itWithOuter "rejects a Postgres type that does not exist, behind a * too" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select x.* from (select 'abc'::text) x" [] (Just [Column "Shop.Missing" "missing_domain" False])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("no such Postgres type: missing_domain" `isInfixOf`)
+
+    itWithOuter "rejects a UNION whose branches do not agree, which fails as sent too" \conn -> do
+        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select name from account union all select 1" [] (Just [int64])]
+        code `shouldBe` ExitFailure 1
+        out `shouldSatisfy` ("UNION types text and integer cannot be matched" `isInfixOf`)
 
     itWithOuter "rejects a Postgres type the database does not have" \conn -> do
         (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False])]
         code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("type \"nosuchtype\" does not exist" `isInfixOf`)
+        out `shouldSatisfy` ("no such Postgres type: nosuchtype" `isInfixOf`)
 
     itWithOuter "warns about a nullable column read without a Maybe" \conn -> do
         (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [text])]
