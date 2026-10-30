@@ -43,9 +43,10 @@ module Hasql.Check.Inferred.TH (
 
 import Data.Char (isAlphaNum)
 import Data.List (foldl1')
-import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 #ifdef KRONOR_SYNTAX
 import Data.List.NonEmpty qualified as NonEmpty
+import Data.Map.Strict qualified as Map
 #endif
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -181,18 +182,49 @@ its result row.
 parsed :: Text -> Either String Parsed
 parsed sql = do
     forked <- parseForkStmt sql
-    let (lowered, inputs) = Ast.lower forked
-        -- InputParams maps each ($n, field) to its lowered placeholder.
-        slots = [Slot n field | (_, (n, field)) <- Map.toAscList (Map.fromList [(v, k) | (k, v) <- Map.toList inputs])]
-        arity = maximum (0 : [n | ((n, _), _) <- Map.toList inputs])
-    t <- template (Text.decodeUtf8Lenient (renderStmt (Ast.eraseHaskellTargets lowered)))
+    let (sent, lowered) = lowerStmt forked
+    t <- template (Text.decodeUtf8Lenient (renderStmt sent))
+    let (slots, arity) = fromMaybe (plainSlots t) lowered
     pure
         Parsed
             { parsedTemplate = t
             , parsedSlots = slots
             , parsedArity = arity
-            , parsedTargets = targets lowered
+            , parsedTargets = targets sent
             }
+
+{- | One slot per placeholder, each sending the whole of its parameter, for a
+statement with no param fields to lower.
+-}
+plainSlots :: Template -> ([Slot], Int)
+plainSlots t = ([Slot i Nothing | i <- [1 .. n]], n)
+  where
+    n = maximum (0 : [i | ParamType i <- t.whole])
+
+#ifdef KRONOR_SYNTAX
+
+-- | The statement as it is sent -- lowered, with the Haskell targets erased
+-- -- and which parameter each of its placeholders sends.
+lowerStmt :: Ast.PreparableStmt -> (Ast.PreparableStmt, Maybe ([Slot], Int))
+lowerStmt stmt =
+    ( Ast.eraseHaskellTargets lowered
+    , -- InputParams maps each ($n, field) to its lowered placeholder.
+      Just
+        ( [Slot n field | (_, (n, field)) <- Map.toAscList (Map.fromList [(v, k) | (k, v) <- Map.toList inputs])]
+        , maximum (0 : [n | ((n, _), _) <- Map.toList inputs])
+        )
+    )
+  where
+    (lowered, inputs) = Ast.lower stmt
+
+#else
+
+-- | Upstream hasql-th has no param fields and no targets to erase, so the
+-- statement is sent as parsed and its placeholders are its parameters.
+lowerStmt :: Ast.PreparableStmt -> (Ast.PreparableStmt, Maybe ([Slot], Int))
+lowerStmt stmt = (stmt, Nothing)
+
+#endif
 
 #ifdef KRONOR_SYNTAX
 
