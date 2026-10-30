@@ -182,15 +182,17 @@ its result row.
 parsed :: Text -> Either String Parsed
 parsed sql = do
     forked <- parseForkStmt sql
-    let (sent, lowered) = lowerStmt forked
+    -- The targets are read off the lowered statement, before they are erased
+    -- for the one that is sent.
+    let (sent, lowered, slots') = lowerStmt forked
     t <- template (Text.decodeUtf8Lenient (renderStmt sent))
-    let (slots, arity) = fromMaybe (plainSlots t) lowered
+    let (slots, arity) = fromMaybe (plainSlots t) slots'
     pure
         Parsed
             { parsedTemplate = t
             , parsedSlots = slots
             , parsedArity = arity
-            , parsedTargets = targets sent
+            , parsedTargets = targets lowered
             }
 
 {- | One slot per placeholder, each sending the whole of its parameter, for a
@@ -203,11 +205,13 @@ plainSlots t = ([Slot i Nothing | i <- [1 .. n]], n)
 
 #ifdef KRONOR_SYNTAX
 
--- | The statement as it is sent -- lowered, with the Haskell targets erased
--- -- and which parameter each of its placeholders sends.
-lowerStmt :: Ast.PreparableStmt -> (Ast.PreparableStmt, Maybe ([Slot], Int))
+-- | The statement as it is sent (lowered, with the Haskell targets erased),
+-- as its targets are read (lowered, with them still there), and which
+-- parameter each of its placeholders sends.
+lowerStmt :: Ast.PreparableStmt -> (Ast.PreparableStmt, Ast.PreparableStmt, Maybe ([Slot], Int))
 lowerStmt stmt =
     ( Ast.eraseHaskellTargets lowered
+    , lowered
     , -- InputParams maps each ($n, field) to its lowered placeholder.
       Just
         ( [Slot n field | (_, (n, field)) <- Map.toAscList (Map.fromList [(v, k) | (k, v) <- Map.toList inputs])]
@@ -221,8 +225,8 @@ lowerStmt stmt =
 
 -- | Upstream hasql-th has no param fields and no targets to erase, so the
 -- statement is sent as parsed and its placeholders are its parameters.
-lowerStmt :: Ast.PreparableStmt -> (Ast.PreparableStmt, Maybe ([Slot], Int))
-lowerStmt stmt = (stmt, Nothing)
+lowerStmt :: Ast.PreparableStmt -> (Ast.PreparableStmt, Ast.PreparableStmt, Maybe ([Slot], Int))
+lowerStmt stmt = (stmt, stmt, Nothing)
 
 #endif
 
