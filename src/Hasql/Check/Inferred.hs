@@ -52,12 +52,27 @@ module Hasql.Check.Inferred (
     PostgresParams,
     PostgresColumns,
 
+    -- * Targets and slots, for the quoters' own statements
+    Target (..),
+    targetPure,
+    targetColumn,
+    targetAp,
+    Slots (..),
+    slotsNone,
+    slotsOne,
+    slotsAp,
+
     -- * Statements
     Template (..),
     Wrapped (..),
     Piece (..),
     statement,
+    statementWith,
+    statementRow,
     resultless,
+    resultlessWith,
+    rowsAffected,
+    rowsAffectedWith,
     render,
 ) where
 
@@ -354,8 +369,8 @@ instance {-# OVERLAPPABLE #-} Column a => Params a where
 
 instance (Column a, Column b) => Params (a, b) where
     params =
-        (fst >$< E.param encodeColumn)
-            <> (snd >$< E.param encodeColumn)
+        ((\(x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x) -> x) >$< E.param encodeColumn)
 
 
 instance (Column a, Column b, Column c) => Params (a, b, c) where
@@ -415,6 +430,334 @@ instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, 
             <> ((\(_, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
 
 
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i) => Params (a, b, c, d, e, f, g, h, i) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j) => Params (a, b, c, d, e, f, g, h, i, j) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k) => Params (a, b, c, d, e, f, g, h, i, j, k) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l) => Params (a, b, c, d, e, f, g, h, i, j, k, l) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u, Column v) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u, Column v, Column w) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u, Column v, Column w, Column x) => Params (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x) where
+    params =
+        ((\(x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x, _) -> x) >$< E.param encodeColumn)
+            <> ((\(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, x) -> x) >$< E.param encodeColumn)
+
+
 -- | The Postgres types of a statement's parameters.
 type family PgParamTypes (p :: Type) :: [Symbol] where
     PgParamTypes () = '[]
@@ -425,6 +768,22 @@ type family PgParamTypes (p :: Type) :: [Symbol] where
     PgParamTypes (a, b, c, d, e, f) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f]
     PgParamTypes (a, b, c, d, e, f, g) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g]
     PgParamTypes (a, b, c, d, e, f, g, h) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h]
+    PgParamTypes (a, b, c, d, e, f, g, h, i) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u, PgColumnType v]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u, PgColumnType v, PgColumnType w]
+    PgParamTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u, PgColumnType v, PgColumnType w, PgColumnType x]
     PgParamTypes a = '[PgColumnType a]
 
 
@@ -438,6 +797,22 @@ type family PgParamLabels (p :: Type) :: [[Symbol]] where
     PgParamLabels (a, b, c, d, e, f) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f]
     PgParamLabels (a, b, c, d, e, f, g) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g]
     PgParamLabels (a, b, c, d, e, f, g, h) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h]
+    PgParamLabels (a, b, c, d, e, f, g, h, i) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u, PgColumnLabels v]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u, PgColumnLabels v, PgColumnLabels w]
+    PgParamLabels (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u, PgColumnLabels v, PgColumnLabels w, PgColumnLabels x]
     PgParamLabels a = '[PgColumnLabels a]
 
 
@@ -478,6 +853,70 @@ instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, 
     row = (,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
 
 
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i) => Row (a, b, c, d, e, f, g, h, i) where
+    row = (,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j) => Row (a, b, c, d, e, f, g, h, i, j) where
+    row = (,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k) => Row (a, b, c, d, e, f, g, h, i, j, k) where
+    row = (,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l) => Row (a, b, c, d, e, f, g, h, i, j, k, l) where
+    row = (,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m) where
+    row = (,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
+    row = (,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
+    row = (,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) where
+    row = (,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q) where
+    row = (,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) where
+    row = (,,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s) where
+    row = (,,,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t) where
+    row = (,,,,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u) where
+    row = (,,,,,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u, Column v) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v) where
+    row = (,,,,,,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u, Column v, Column w) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w) where
+    row = (,,,,,,,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
+instance (Column a, Column b, Column c, Column d, Column e, Column f, Column g, Column h, Column i, Column j, Column k, Column l, Column m, Column n, Column o, Column p, Column q, Column r, Column s, Column t, Column u, Column v, Column w, Column x) => Row (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x) where
+    row = (,,,,,,,,,,,,,,,,,,,,,,,) <$> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn <*> D.column decodeColumn
+
+
 -- | The Postgres types of a statement's result columns.
 type family PgColumnTypes (r :: Type) :: [Symbol] where
     PgColumnTypes (a, b) = '[PgColumnType a, PgColumnType b]
@@ -487,6 +926,22 @@ type family PgColumnTypes (r :: Type) :: [Symbol] where
     PgColumnTypes (a, b, c, d, e, f) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f]
     PgColumnTypes (a, b, c, d, e, f, g) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g]
     PgColumnTypes (a, b, c, d, e, f, g, h) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u, PgColumnType v]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u, PgColumnType v, PgColumnType w]
+    PgColumnTypes (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x) = '[PgColumnType a, PgColumnType b, PgColumnType c, PgColumnType d, PgColumnType e, PgColumnType f, PgColumnType g, PgColumnType h, PgColumnType i, PgColumnType j, PgColumnType k, PgColumnType l, PgColumnType m, PgColumnType n, PgColumnType o, PgColumnType p, PgColumnType q, PgColumnType r, PgColumnType s, PgColumnType t, PgColumnType u, PgColumnType v, PgColumnType w, PgColumnType x]
     PgColumnTypes a = '[PgColumnType a]
 
 
@@ -499,6 +954,22 @@ type family PgColumnLabelLists (r :: Type) :: [[Symbol]] where
     PgColumnLabelLists (a, b, c, d, e, f) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f]
     PgColumnLabelLists (a, b, c, d, e, f, g) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g]
     PgColumnLabelLists (a, b, c, d, e, f, g, h) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u, PgColumnLabels v]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u, PgColumnLabels v, PgColumnLabels w]
+    PgColumnLabelLists (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x) = '[PgColumnLabels a, PgColumnLabels b, PgColumnLabels c, PgColumnLabels d, PgColumnLabels e, PgColumnLabels f, PgColumnLabels g, PgColumnLabels h, PgColumnLabels i, PgColumnLabels j, PgColumnLabels k, PgColumnLabels l, PgColumnLabels m, PgColumnLabels n, PgColumnLabels o, PgColumnLabels p, PgColumnLabels q, PgColumnLabels r, PgColumnLabels s, PgColumnLabels t, PgColumnLabels u, PgColumnLabels v, PgColumnLabels w, PgColumnLabels x]
     PgColumnLabelLists a = '[PgColumnLabels a]
 
 
@@ -613,6 +1084,111 @@ render paramTypes' columnTypes' t = case (columnTypes', t.wrapped) of
             _ -> ""
 
 
+-- | A row decoder the quoter built out of a statement's target list, carrying
+-- the Postgres types and enum labels its columns are read as. Kronor's
+-- Haskell targets need it: only the statement knows the row's shape, and the
+-- column types are the constructor's fields'.
+newtype Target (cs :: [Symbol]) (ls :: [[Symbol]]) r = Target {targetRow :: D.Row r}
+
+
+-- | A target that reads no columns: a constructor, before its arguments.
+targetPure :: r -> Target '[] '[] r
+targetPure = Target . pure
+
+
+-- | One column, read as whatever Haskell reads it as.
+targetColumn :: forall a. Column a => Target '[PgColumnType a] '[PgColumnLabels a] a
+targetColumn = Target (D.column decodeColumn)
+
+
+-- | A constructor applied to one more column, appending its type.
+targetAp :: Target cs ls (a -> b) -> Target ds ms a -> Target (Append cs ds) (Append ls ms) b
+targetAp (Target f) (Target x) = Target (f <*> x)
+
+
+-- | A parameter encoder the quoter built out of a statement's placeholders,
+-- carrying the Postgres types they are sent as. Kronor's @$1.$field@ param
+-- fields need it: each sends a field of a parameter, not the whole of it.
+newtype Slots (ps :: [Symbol]) (ls :: [[Symbol]]) p = Slots {slotsParams :: E.Params p}
+
+
+-- | No parameters.
+slotsNone :: Slots '[] '[] p
+slotsNone = Slots mempty
+
+
+-- | One parameter slot, sending what the projection picks out.
+slotsOne :: forall a p. Column a => (p -> a) -> Slots '[PgColumnType a] '[PgColumnLabels a] p
+slotsOne f = Slots (f >$< E.param encodeColumn)
+
+
+-- | One more slot, appending its type.
+slotsAp :: Slots ps ls p -> Slots qs ms p -> Slots (Append ps qs) (Append ls ms) p
+slotsAp (Slots a) (Slots b) = Slots (a <> b)
+
+
+-- | A statement returning rows, whose decoder and encoder the quoter built
+-- because the statement's own syntax decides them.
+statementWith ::
+    forall p r a ps cs pl cl.
+    (PostgresParams ps, PostgresColumns cs, PostgresParamLabels pl, PostgresColumnLabels cl) =>
+    Template ->
+    Slots ps pl p ->
+    Target cs cl r ->
+    (D.Row r -> D.Result a) ->
+    Statement p a
+statementWith template slots target result =
+    Statement.preparable
+        (render (symbolTexts @ps) (symbolTexts @cs) template)
+        (slotsParams slots)
+        (result (targetRow target))
+
+
+-- | A statement whose encoder the quoter built, but whose row the Haskell
+-- type decides: a target list the quoter cannot count, such as a @*@.
+statementRow ::
+    forall p r a ps cs pl cl.
+    ( Row r
+    , cs ~ PgColumnTypes r
+    , cl ~ PgColumnLabelLists r
+    , PostgresParams ps
+    , PostgresColumns cs
+    , PostgresParamLabels pl
+    , PostgresColumnLabels cl
+    ) =>
+    Template ->
+    Slots ps pl p ->
+    (D.Row r -> D.Result a) ->
+    Statement p a
+statementRow template slots result =
+    Statement.preparable
+        (render (symbolTexts @ps) (symbolTexts @cs) template)
+        (slotsParams slots)
+        (result row)
+
+
+-- | A statement returning no rows, whose encoder the quoter built.
+resultlessWith ::
+    forall p ps pl.
+    (PostgresParams ps, PostgresParamLabels pl) =>
+    Template ->
+    Slots ps pl p ->
+    Statement p ()
+resultlessWith template slots =
+    Statement.preparable (render (symbolTexts @ps) [] template) (slotsParams slots) D.noResult
+
+
+-- | A statement counting the rows it affected, whose encoder the quoter built.
+rowsAffectedWith ::
+    forall p ps pl.
+    (PostgresParams ps, PostgresParamLabels pl) =>
+    Template ->
+    Slots ps pl p ->
+    Statement p Int64
+rowsAffectedWith template slots =
+    Statement.preparable (render (symbolTexts @ps) [] template) (slotsParams slots) D.rowsAffected
+
+
 -- | A statement returning rows, given what to make of them.
 statement ::
     forall p r a ps cs pl cl.
@@ -632,6 +1208,15 @@ statement ::
     Statement p a
 statement template result =
     Statement.preparable (render (symbolTexts @ps) (symbolTexts @cs) template) params (result row)
+
+
+-- | A statement whose result is the number of rows it affected.
+rowsAffected ::
+    forall p ps pl.
+    (Params p, ps ~ PgParamTypes p, PostgresParams ps, pl ~ PgParamLabels p, PostgresParamLabels pl) =>
+    Template ->
+    Statement p Int64
+rowsAffected template = Statement.preparable (render (symbolTexts @ps) [] template) params D.rowsAffected
 
 
 -- | A statement returning no rows.

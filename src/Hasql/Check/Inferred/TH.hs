@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 -- |
@@ -20,6 +21,10 @@
 -- > WITH hasql_check_result (c1, c2) AS (SELECT email, nickname FROM customer WHERE id = $1 :: int8)
 -- > SELECT c1 :: text, c2 :: text FROM hasql_check_result
 --
+-- Kronor's Haskell targets and @$1.$field@ param fields work too: the quoter
+-- builds the row decoder and the parameter encoder out of them, and the column
+-- types come from the constructor's fields rather than from a tuple.
+--
 -- GHC can only tell whether those types fit the schema with a database; see
 -- the README for checking them with @hasql-check --inferred@.
 module Hasql.Check.Inferred.TH (
@@ -27,18 +32,44 @@ module Hasql.Check.Inferred.TH (
     maybeStatement,
     vectorStatement,
     resultlessStatement,
+    rowsAffectedStatement,
+    Parsed (..),
+    Slot (..),
+    Tgt (..),
+    parsed,
     template,
 ) where
 
 import Data.Char (isAlphaNum)
+import Data.List (foldl1')
+import Data.Map.Strict qualified as Map
+#ifdef KRONOR_SYNTAX
+import Data.List.NonEmpty qualified as NonEmpty
+#endif
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
-import Hasql.Check (parsePlainStmt, renderStmt)
+import GHC.Records (getField)
+import Hasql.Check (parseForkStmt, parsePlainStmt, renderStmt)
 import Hasql.Check.Annotate (annotate, placeholder)
-import Hasql.Check.Inferred (Piece (..), Template (..), Wrapped (..), resultless, statement)
+import Hasql.Check.Inferred (
+    Piece (..),
+    Template (..),
+    Wrapped (..),
+    resultlessWith,
+    rowsAffectedWith,
+    slotsAp,
+    slotsNone,
+    slotsOne,
+    statementRow,
+    statementWith,
+    targetAp,
+    targetColumn,
+    targetPure,
+ )
 import Hasql.Decoders qualified as D
-import Language.Haskell.TH (Exp, Q)
+import Language.Haskell.TH (Exp, Q, appTypeE, conE, litT, mkName, newName, strTyLit, varE)
+import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (lift)
 import PostgresqlSyntax qualified as Ast
@@ -46,21 +77,172 @@ import Text.Read (readMaybe)
 import Prelude
 
 
-quoter :: (Q Exp -> Q Exp) -> QuasiQuoter
+-- | One SQL placeholder: which Haskell parameter it comes from, and which of
+-- its fields, for Kronor's @$1.$field@.
+data Slot = Slot Int (Maybe Text)
+    deriving stock (Eq, Show)
+
+
+-- | A result column, or a Haskell constructor applied to some.
+data Tgt
+    = TgtColumn
+    | -- | A constructor applied to its arguments in order.
+      TgtApply Text [Tgt]
+    | -- | A constructor whose fields are named, so the statement may write
+      -- them in any order.
+      TgtRecord Text [(Text, Tgt)]
+    deriving stock (Eq, Show)
+
+
+-- | Everything the quoter reads off a statement.
+data Parsed = Parsed
+    { parsedTemplate :: Template
+    , parsedSlots :: [Slot]
+    -- ^ One per SQL placeholder, in the order they are sent.
+    , parsedArity :: Int
+    -- ^ How many parameters the statement takes in Haskell.
+    , parsedTargets :: Maybe [Tgt]
+    -- ^ Its result columns, unless they cannot be counted here: a @*@.
+    }
+    deriving stock (Eq, Show)
+
+
+quoter :: (Parsed -> Q Exp) -> QuasiQuoter
 quoter make =
     QuasiQuoter
-        { quoteExp = either fail (make . lift) . template . Text.pack
+        { quoteExp = either fail make . parsed . Text.pack
         , quotePat = const (fail "Not supported in patterns")
         , quoteType = const (fail "Not supported in types")
         , quoteDec = const (fail "Not supported in declarations")
         }
 
 
-singletonStatement, maybeStatement, vectorStatement, resultlessStatement :: QuasiQuoter
-singletonStatement = quoter \t -> [|statement $t D.singleRow|]
-maybeStatement = quoter \t -> [|statement $t D.rowMaybe|]
-vectorStatement = quoter \t -> [|statement $t D.rowVector|]
-resultlessStatement = quoter \t -> [|resultless $t|]
+-- | A quoter for a statement that returns rows, given what to make of them.
+rowQuoter :: Q Exp -> QuasiQuoter
+rowQuoter result = quoter \p -> do
+    let t = lift p.parsedTemplate
+        s = slotsExp p
+    case p.parsedTargets of
+        Just ts -> [|statementWith $t $s $(targetsExp ts) $result|]
+        Nothing -> [|statementRow $t $s $result|]
+
+
+singletonStatement, maybeStatement, vectorStatement, resultlessStatement, rowsAffectedStatement :: QuasiQuoter
+singletonStatement = rowQuoter [|D.singleRow|]
+maybeStatement = rowQuoter [|D.rowMaybe|]
+vectorStatement = rowQuoter [|D.rowVector|]
+resultlessStatement = quoter \p -> [|resultlessWith $(lift p.parsedTemplate) $(slotsExp p)|]
+rowsAffectedStatement = quoter \p -> [|rowsAffectedWith $(lift p.parsedTemplate) $(slotsExp p)|]
+
+
+-- | The statement's parameter encoder: one slot per placeholder, each picking
+-- its parameter out of the tuple, and its field out of that.
+slotsExp :: Parsed -> Q Exp
+slotsExp p = case p.parsedSlots of
+    [] -> [|slotsNone|]
+    ss -> foldl1' (\a b -> [|slotsAp $a $b|]) (map (slotExp p.parsedArity) ss)
+
+
+slotExp :: Int -> Slot -> Q Exp
+slotExp arity (Slot n field) = do
+    y <- newName "y"
+    -- Wildcards elsewhere: an unused binding warns in the splice's module.
+    let pat
+            | arity <= 1 = TH.varP y
+            | otherwise = TH.tupP [if i == n then TH.varP y else TH.wildP | i <- [1 .. arity]]
+        body = case field of
+            Nothing -> varE y
+            Just f -> [|$(appTypeE (varE 'getField) (litT (strTyLit (Text.unpack f)))) $(varE y)|]
+    [|slotsOne $(TH.lamE [pat] body)|]
+
+
+-- | The statement's row decoder, built out of its target list.
+targetsExp :: [Tgt] -> Q Exp
+targetsExp = \case
+    [t] -> targetExp t
+    ts -> applied [|targetPure $(conE (TH.tupleDataName (length ts)))|] ts
+
+
+targetExp :: Tgt -> Q Exp
+targetExp = \case
+    TgtColumn -> [|targetColumn|]
+    TgtApply ctor args -> applied [|targetPure $(conE (mkName (Text.unpack ctor)))|] args
+    TgtRecord ctor fields -> do
+        -- Bound in the statement's order and assigned by name: applying the
+        -- constructor positionally would cross the values over.
+        xs <- traverse (const (newName "c")) fields
+        let make =
+                TH.lamE
+                    (map TH.varP xs)
+                    (TH.recConE (mkName (Text.unpack ctor)) [TH.fieldExp (mkName (Text.unpack n)) (varE x) | ((n, _), x) <- zip fields xs])
+        applied [|targetPure $make|] (map snd fields)
+
+
+applied :: Q Exp -> [Tgt] -> Q Exp
+applied = foldl \f a -> [|targetAp $f $(targetExp a)|]
+
+
+-- | Everything the quoters need: the statement cut where its parameters'
+-- annotations go, which parameter each placeholder sends, and the shape of
+-- its result row.
+parsed :: Text -> Either String Parsed
+parsed sql = do
+    forked <- parseForkStmt sql
+    let (lowered, inputs) = Ast.lower forked
+        -- InputParams maps each ($n, field) to its lowered placeholder.
+        slots = [Slot n field | (_, (n, field)) <- Map.toAscList (Map.fromList [(v, k) | (k, v) <- Map.toList inputs])]
+        arity = maximum (0 : [n | ((n, _), _) <- Map.toList inputs])
+    t <- template (Text.decodeUtf8Lenient (renderStmt (Ast.eraseHaskellTargets lowered)))
+    pure
+        Parsed
+            { parsedTemplate = t
+            , parsedSlots = slots
+            , parsedArity = arity
+            , parsedTargets = targets lowered
+            }
+
+
+#ifdef KRONOR_SYNTAX
+
+-- | The outermost SELECT's target list, as Haskell targets: 'Nothing' when it
+-- is not a list this can count, such as a @*@, where the Haskell row type
+-- decides the columns instead.
+targets :: Ast.PreparableStmt -> Maybe [Tgt]
+targets = \case
+    Ast.SelectPreparableStmt s -> traverse targetOf . NonEmpty.toList =<< selectStmt s
+    _ -> Nothing
+  where
+    selectStmt = \case
+        Ast.NoParensSelectStmt (Ast.SelectNoParens _ c _ _ _) -> selectClause c
+        Ast.WithParensSelectStmt p -> withParens p
+    withParens = \case
+        Ast.NoParensSelectWithParens (Ast.SelectNoParens _ c _ _ _) -> selectClause c
+        Ast.WithParensSelectWithParens p -> withParens p
+    selectClause = \case
+        Ast.SimpleSelectSelectClause (Ast.NormalSimpleSelect (Just (Ast.NormalTargeting (Ast.HsTargetList ts))) _ _ _ _ _ _) -> Just ts
+        Ast.WithParensSelectClause p -> withParens p
+        _ -> Nothing
+
+
+-- | What a target element reads, or 'Nothing' when it stands for however many
+-- columns a table has: a @*@ or a @t.*@, which only the schema can count.
+targetOf :: Ast.HsTargetEl -> Maybe Tgt
+targetOf = \case
+    Ast.SqlTargetEl Ast.AsteriskTargetEl -> Nothing
+    Ast.SqlTargetEl (Ast.ExprTargetEl (Ast.CExprAExpr (Ast.ColumnrefCExpr (Ast.Columnref _ (Just (Ast.Indirection is))))))
+        | Ast.AllIndirectionEl <- NonEmpty.last is -> Nothing
+    Ast.SqlTargetEl _ -> Just TgtColumn
+    Ast.HsFuncTargetEl ctor args -> TgtApply ctor <$> traverse targetOf args
+    Ast.HsRecTargetEl ctor fields -> TgtRecord ctor <$> traverse (\(Ast.HsFieldEl n t) -> (,) n <$> targetOf t) (NonEmpty.toList fields)
+
+#else
+
+-- | Upstream hasql-th has no Haskell targets, so the Haskell row type always
+-- decides the columns.
+targets :: Ast.PreparableStmt -> Maybe [Tgt]
+targets _ = Nothing
+
+#endif
 
 
 -- | The statement, rendered as hasql-th would render it, cut where its

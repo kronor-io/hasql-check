@@ -43,6 +43,13 @@ parsePlainStmt :: Bool -> Text -> Either String Ast.PreparableStmt
 parsePlainStmt markers sql = either (Left . Text.unpack) Right (Ast.parse (Ast.nullabilityMarkers markers) sql)
 
 
+-- | A statement in whatever syntax this build's quotes take, left exactly as
+-- parsed: the quoters of "Hasql.Check.Inferred.TH" read Kronor's Haskell
+-- targets off it, and lower it themselves.
+parseForkStmt :: Text -> Either String Ast.PreparableStmt
+parseForkStmt sql = either (Left . Text.unpack) Right (Ast.parse quoterSettings sql)
+
+
 renderStmt :: Ast.PreparableStmt -> ByteString
 renderStmt = Text.encodeUtf8 . Ast.toText mempty
 

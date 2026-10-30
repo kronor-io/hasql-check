@@ -223,13 +223,19 @@ executable hasql-check
 test-suite hasql-check-test
   type:               exitcode-stdio-1.0
   main-is:            Main.hs
+  other-modules:      Inferred.Shapes
   hs-source-dirs:     test
   default-language:   GHC2021
   default-extensions:
     BlockArguments
     DataKinds
+    DerivingVia
     LambdaCase
+    OverloadedRecordDot
     OverloadedStrings
+    QuasiQuotes
+    TemplateHaskell
+    UndecidableInstances
 
   ghc-options:        -Wall -threaded -rtsopts -with-rtsopts=-N
 
