@@ -7,9 +7,10 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 
--- | Every shape the inferred quoters must take. Nothing runs: the types are
--- the assertion, and a quoter that builds the wrong row, or reads a column at
--- the wrong type, fails to compile.
+{- | Every shape the inferred quoters must take. Nothing runs: the types are
+the assertion, and a quoter that builds the wrong row, or reads a column at
+the wrong type, fails to compile.
+-}
 module Inferred.Shapes where
 
 import Data.Int (Int32, Int64)
@@ -21,16 +22,13 @@ import Hasql.Check.Inferred.TH
 import Hasql.Statement (Statement)
 import Prelude
 
-
 -- A plain tuple row, as before.
 plain :: Statement Int64 (Maybe (Text, Maybe Text))
 plain = [maybeStatement| select email, nickname from customer where id = $1 |]
 
-
 -- A row of more than eight columns, past the old tuple cap.
 wide :: Statement () (Vector (Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64))
 wide = [vectorStatement| select a, b, c, d, e, f, g, h, i, j from wide |]
-
 
 -- Seventeen parameters, the widest statement in the repository.
 manyParams :: Statement (Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64) ()
@@ -127,20 +125,16 @@ paramField =
 
 #endif
 
-
 -- rowsAffected, which had no inferred quoter.
 affected :: Statement Int64 Int64
 affected = [rowsAffectedStatement| update session set last_seen = now() where id = $1 |]
-
 
 -- A star, whose columns only the Haskell type can count.
 star :: Statement () (Vector (Int64, Text))
 star = [vectorStatement| select * from pair |]
 
-
 newtype Email = Email Text
     deriving newtype (Value)
-
 
 -- A newtype column, read as the type it wraps.
 newtyped :: Statement Int64 Email

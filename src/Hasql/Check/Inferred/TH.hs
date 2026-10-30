@@ -1,32 +1,33 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE TemplateHaskell #-}
 
--- |
--- Module      : Hasql.Check.Inferred.TH
--- Copyright   : (c) 2026 Kronor.io
---
--- License     : BSD-3-Clause
--- Maintainer  : lorenzo@kronor.io
--- Stability   : experimental
--- Portability : GHC
---
--- Quoters for SQL without annotations: the Haskell types a statement is used
--- with decide its parameter and result types.
---
--- > profile :: Statement Int64 (Maybe (Text, Maybe Text))
--- > profile = [maybeStatement| select email, nickname from customer where id = $1 |]
---
--- sends
---
--- > WITH hasql_check_result (c1, c2) AS (SELECT email, nickname FROM customer WHERE id = $1 :: int8)
--- > SELECT c1 :: text, c2 :: text FROM hasql_check_result
---
--- Kronor's Haskell targets and @$1.$field@ param fields work too: the quoter
--- builds the row decoder and the parameter encoder out of them, and the column
--- types come from the constructor's fields rather than from a tuple.
---
--- GHC can only tell whether those types fit the schema with a database; see
--- the README for checking them with @hasql-check --inferred@.
+{- |
+Module      : Hasql.Check.Inferred.TH
+Copyright   : (c) 2026 Kronor.io
+
+License     : BSD-3-Clause
+Maintainer  : lorenzo@kronor.io
+Stability   : experimental
+Portability : GHC
+
+Quoters for SQL without annotations: the Haskell types a statement is used
+with decide its parameter and result types.
+
+> profile :: Statement Int64 (Maybe (Text, Maybe Text))
+> profile = [maybeStatement| select email, nickname from customer where id = $1 |]
+
+sends
+
+> WITH hasql_check_result (c1, c2) AS (SELECT email, nickname FROM customer WHERE id = $1 :: int8)
+> SELECT c1 :: text, c2 :: text FROM hasql_check_result
+
+Kronor's Haskell targets and @$1.$field@ param fields work too: the quoter
+builds the row decoder and the parameter encoder out of them, and the column
+types come from the constructor's fields rather than from a tuple.
+
+GHC can only tell whether those types fit the schema with a database; see
+the README for checking them with @hasql-check --inferred@.
+-}
 module Hasql.Check.Inferred.TH (
     singletonStatement,
     maybeStatement,
@@ -76,23 +77,22 @@ import PostgresqlSyntax qualified as Ast
 import Text.Read (readMaybe)
 import Prelude
 
-
--- | One SQL placeholder: which Haskell parameter it comes from, and which of
--- its fields, for Kronor's @$1.$field@.
+{- | One SQL placeholder: which Haskell parameter it comes from, and which of
+its fields, for Kronor's @$1.$field@.
+-}
 data Slot = Slot Int (Maybe Text)
     deriving stock (Eq, Show)
-
 
 -- | A result column, or a Haskell constructor applied to some.
 data Tgt
     = TgtColumn
     | -- | A constructor applied to its arguments in order.
       TgtApply Text [Tgt]
-    | -- | A constructor whose fields are named, so the statement may write
-      -- them in any order.
+    | {- | A constructor whose fields are named, so the statement may write
+      them in any order.
+      -}
       TgtRecord Text [(Text, Tgt)]
     deriving stock (Eq, Show)
-
 
 -- | Everything the quoter reads off a statement.
 data Parsed = Parsed
@@ -106,7 +106,6 @@ data Parsed = Parsed
     }
     deriving stock (Eq, Show)
 
-
 quoter :: (Parsed -> Q Exp) -> QuasiQuoter
 quoter make =
     QuasiQuoter
@@ -115,7 +114,6 @@ quoter make =
         , quoteType = const (fail "Not supported in types")
         , quoteDec = const (fail "Not supported in declarations")
         }
-
 
 -- | A quoter for a statement that returns rows, given what to make of them.
 rowQuoter :: Q Exp -> QuasiQuoter
@@ -126,7 +124,6 @@ rowQuoter result = quoter \p -> do
         Just ts -> [|statementWith $t $s $(targetsExp ts) $result|]
         Nothing -> [|statementRow $t $s $result|]
 
-
 singletonStatement, maybeStatement, vectorStatement, resultlessStatement, rowsAffectedStatement :: QuasiQuoter
 singletonStatement = rowQuoter [|D.singleRow|]
 maybeStatement = rowQuoter [|D.rowMaybe|]
@@ -134,14 +131,13 @@ vectorStatement = rowQuoter [|D.rowVector|]
 resultlessStatement = quoter \p -> [|resultlessWith $(lift p.parsedTemplate) $(slotsExp p)|]
 rowsAffectedStatement = quoter \p -> [|rowsAffectedWith $(lift p.parsedTemplate) $(slotsExp p)|]
 
-
--- | The statement's parameter encoder: one slot per placeholder, each picking
--- its parameter out of the tuple, and its field out of that.
+{- | The statement's parameter encoder: one slot per placeholder, each picking
+its parameter out of the tuple, and its field out of that.
+-}
 slotsExp :: Parsed -> Q Exp
 slotsExp p = case p.parsedSlots of
     [] -> [|slotsNone|]
     ss -> foldl1' (\a b -> [|slotsAp $a $b|]) (map (slotExp p.parsedArity) ss)
-
 
 slotExp :: Int -> Slot -> Q Exp
 slotExp arity (Slot n field) = do
@@ -155,13 +151,11 @@ slotExp arity (Slot n field) = do
             Just f -> [|$(appTypeE (varE 'getField) (litT (strTyLit (Text.unpack f)))) $(varE y)|]
     [|slotsOne $(TH.lamE [pat] body)|]
 
-
 -- | The statement's row decoder, built out of its target list.
 targetsExp :: [Tgt] -> Q Exp
 targetsExp = \case
     [t] -> targetExp t
     ts -> applied [|targetPure $(conE (TH.tupleDataName (length ts)))|] ts
-
 
 targetExp :: Tgt -> Q Exp
 targetExp = \case
@@ -177,14 +171,13 @@ targetExp = \case
                     (TH.recConE (mkName (Text.unpack ctor)) [TH.fieldExp (mkName (Text.unpack n)) (varE x) | ((n, _), x) <- zip fields xs])
         applied [|targetPure $make|] (map snd fields)
 
-
 applied :: Q Exp -> [Tgt] -> Q Exp
 applied = foldl \f a -> [|targetAp $f $(targetExp a)|]
 
-
--- | Everything the quoters need: the statement cut where its parameters'
--- annotations go, which parameter each placeholder sends, and the shape of
--- its result row.
+{- | Everything the quoters need: the statement cut where its parameters'
+annotations go, which parameter each placeholder sends, and the shape of
+its result row.
+-}
 parsed :: Text -> Either String Parsed
 parsed sql = do
     forked <- parseForkStmt sql
@@ -200,7 +193,6 @@ parsed sql = do
             , parsedArity = arity
             , parsedTargets = targets lowered
             }
-
 
 #ifdef KRONOR_SYNTAX
 
@@ -244,10 +236,10 @@ targets _ = Nothing
 
 #endif
 
-
--- | The statement, rendered as hasql-th would render it, cut where its
--- parameters' annotations go, and split where its result columns' cast
--- goes around it.
+{- | The statement, rendered as hasql-th would render it, cut where its
+parameters' annotations go, and split where its result columns' cast
+goes around it.
+-}
 template :: Text -> Either String Template
 template sql = do
     stmt <- parsePlainStmt False sql
@@ -272,7 +264,6 @@ template sql = do
                     <$> splitWith annotated
             }
 
-
 -- | The statement's own WITH list, and the rest of it.
 splitWith :: Ast.PreparableStmt -> Maybe (Maybe Ast.WithClause, Ast.PreparableStmt)
 splitWith = \case
@@ -288,14 +279,13 @@ splitWith = \case
     Ast.DeletePreparableStmt (Ast.DeleteStmt w a b c d) -> Just (w, Ast.DeletePreparableStmt (Ast.DeleteStmt Nothing a b c d))
     Ast.CallPreparableStmt _ -> Nothing
 
-
--- | A parenthesised SELECT's WITH list, and the rest of it: the list can go
--- outside the parentheses, and must, if it has a data-modifying statement.
+{- | A parenthesised SELECT's WITH list, and the rest of it: the list can go
+outside the parentheses, and must, if it has a data-modifying statement.
+-}
 inParens :: Ast.SelectWithParens -> (Maybe Ast.WithClause, Ast.SelectWithParens)
 inParens = \case
     Ast.NoParensSelectWithParens (Ast.SelectNoParens w c s l f) -> (w, Ast.NoParensSelectWithParens (Ast.SelectNoParens Nothing c s l f))
     Ast.WithParensSelectWithParens s -> Ast.WithParensSelectWithParens <$> inParens s
-
 
 cutWith :: Text -> Text -> [Piece]
 cutWith prefix = cut
