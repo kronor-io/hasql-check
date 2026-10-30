@@ -22,7 +22,7 @@ author:          Kronor
 maintainer:      lorenzo@kronor.io
 copyright:       2026 Kronor
 build-type:      Simple
-tested-with:     GHC ==9.12.4 || ==9.14.1
+tested-with:     GHC ==9.10.3 || ==9.12.4 || ==9.14.1
 extra-doc-files: README.md
 
 source-repository head
@@ -94,7 +94,7 @@ executable hasql-th-format
     ghc-options: -Werror
 
   build-depends:
-    , base               >=4.21 && <4.23
+    , base               >=4.20 && <4.23
     , bytestring         >=0.11 && <0.13
     , hasql-check        >=0.5  && <0.6
     , postgresql-syntax  >=0.5  && <0.6
@@ -121,7 +121,7 @@ executable hasql-th-audit
   if flag(lint)
     ghc-options: -Werror
   build-depends:
-    , base               >=4.21 && <4.23
+    , base               >=4.20 && <4.23
     , bytestring         >=0.11 && <0.13
     , hasql-check        >=0.5  && <0.6
     , postgresql-syntax  >=0.5  && <0.6
@@ -148,7 +148,7 @@ test-suite hasql-th-format-test
   if flag(lint)
     ghc-options: -Werror
   build-depends:
-    , base                >=4.21 && <4.23
+    , base                >=4.20 && <4.23
     , hasql-check         >=0.5  && <0.6
     , postgresql-syntax   >=0.5  && <0.6
     , prettyprinter       >=1.7  && <1.8

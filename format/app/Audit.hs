@@ -6,8 +6,7 @@
 -- same lexer/parser the formatter uses), parses each SQL block with
 -- postgresql-syntax, and reports any pair whose AST differs. Designed to
 -- audit a large reformat for accidental semantic regressions like the
--- `DISTINCT ON (...)` clause that was silently dropped by PR #5324 in
--- `Worker.BinTable.Shift4`.
+-- `DISTINCT ON (...)` clause that a renderer bug once dropped silently.
 --
 -- Exit codes:
 --   0 — all QQs in the file have semantically equivalent ASTs

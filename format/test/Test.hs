@@ -1020,18 +1020,18 @@ tests =
         "[55] (expr)::type — parenthesized wrap-eligible expression with a typecast wraps when too long"
         4
         [__i|
-            select (json_build_object('https://hasura.io/jwt/claims', $2::jsonb?, 'iat', extract(epoch from now()), 'exp', extract(epoch from now() + interval '1 hour'), 'tid', $4::text?, 'ttype', $3::text?, 'tname', null, 'associated_email', $1::text?)::jsonb)::json
+            select (json_build_object('https://myapp.dev/jwt/claims', $2::jsonb?, 'iat', extract(epoch from now()), 'exp', extract(epoch from now() + interval '1 hour'), 'uid', $4::text?, 'utype', $3::text?, 'uname', null, 'registered_email', $1::text?)::jsonb)::json
         |]
         [__i|
             select (
                 json_build_object(
-                      'https://hasura.io/jwt/claims', $2::jsonb?
+                      'https://myapp.dev/jwt/claims', $2::jsonb?
                     , 'iat', extract(epoch from now())
                     , 'exp', extract(epoch from now() + interval '1 hour')
-                    , 'tid', $4::text?
-                    , 'ttype', $3::text?
-                    , 'tname', null
-                    , 'associated_email', $1::text?
+                    , 'uid', $4::text?
+                    , 'utype', $3::text?
+                    , 'uname', null
+                    , 'registered_email', $1::text?
                 )::jsonb
             )::json
         |]
