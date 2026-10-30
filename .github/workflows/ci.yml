@@ -37,6 +37,7 @@ jobs:
       # cabal check only looks at the package in the working directory.
       - run: cabal check
       - run: cd ghc && cabal check
+      - run: cd format && cabal check
       - run: cabal sdist all
 
   # hasql-check itself does not use the GHC API, so it is built on every GHC

@@ -1,4 +1,4 @@
-packages: . ghc
+packages: . ghc format
 
 -- hasql-check-ghc's plugin tests compile fixtures with GHC itself, which
 -- finds the plugin through this.
