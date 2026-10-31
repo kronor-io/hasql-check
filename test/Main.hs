@@ -39,7 +39,6 @@ import System.Process qualified as Process
 import Test.Syd
 import Prelude
 
-
 main :: IO ()
 main = sydTest do
     describe "parseQuasiQuotes" lexerSpec
@@ -54,13 +53,11 @@ main = sydTest do
     -- so they run one at a time, in order.
     describe "Hasql.Check.TH" $ sequential $ doNotRandomiseExecutionOrder $ aroundAll withPostgres thSpec
 
-
 -- | The quoter, its line and column, and the SQL, of every quasiquote found.
 quotes :: Text -> Either String [(Text, Int, Int, Text)]
 quotes source =
     map (\(QuasiQuote (AlexPn _ line col, quoter) (_, sql)) -> (quoter, line, col, sql))
         <$> parseQuasiQuotes (ByteString.Lazy.fromStrict (Text.Encoding.encodeUtf8 source))
-
 
 lexerSpec :: Spec
 lexerSpec = do
@@ -116,9 +113,9 @@ lexerSpec = do
         quotes "f = [singletonStatement|select 1 :: int4\n"
             `shouldSatisfy` either ("not closed" `isInfixOf`) (const False)
 
-
--- | A connection string for a throwaway server, reachable only over a socket
--- in a temporary directory.
+{- | A connection string for a throwaway server, reachable only over a socket
+in a temporary directory.
+-}
 withPostgres :: (Text -> IO ()) -> IO ()
 withPostgres action =
     withSystemTempDirectory "hasql-check" \dir -> do
@@ -136,9 +133,9 @@ withPostgres action =
                 callProcess "psql" [Text.unpack conn, "--quiet", "--command", "create table account (id int4 primary key, name text not null, nickname text); create index on account (nickname); create table note (account_id int4 not null references account, body text not null); create domain cents as int8; create domain positive_cents as cents check (value > 0); create table wallet (balance positive_cents not null); create table ledger (id int8 primary key, small int2, amount int8 not null, rate float8, at timestamptz, price cents); create table tag (id int4 primary key, label varchar(20) not null); insert into tag values (1, 'red'); create table tagged (id int4 primary key, labels text[] not null, scores int4[]); insert into tagged values (1, '{a,b}', '{1,NULL,3}'); create table totals (id int4 primary key, amounts int8[] not null); create type payment_state as enum ('PENDING', 'PAID', 'REFUNDED'); create table payment (id int4 primary key, state payment_state not null); insert into payment values (1, 'PAID'); create domain payment_status as payment_state; create table payment_log (id int4 primary key, status payment_status not null); insert into payment_log values (1, 'REFUNDED')"]
                 action conn
 
-
--- | Run the executable on a source file and the given flags, with extra
--- environment variables; return the exit code and stdout.
+{- | Run the executable on a source file and the given flags, with extra
+environment variables; return the exit code and stdout.
+-}
 runOn :: [(String, String)] -> [String] -> Text -> IO (ExitCode, String)
 runOn env args source =
     withSystemTempDirectory "hasql-check-src" \dir -> do
@@ -152,7 +149,6 @@ runOn env args source =
                 (proc "hasql-check" (args <> [file])){Process.env = Just procEnv}
                 ""
         pure (code, out <> err)
-
 
 executableSpec :: TestDef '[Text] ()
 executableSpec = do
@@ -209,7 +205,6 @@ executableSpec = do
   where
     isSuffixOfStr suffix s = Text.pack suffix `Text.isSuffixOf` Text.pack s
 
-
 -- | The syntax only Kronor's fork of hasql-th accepts.
 syntaxSpec :: TestDef '[Text] ()
 #ifdef KRONOR_SYNTAX
@@ -222,6 +217,14 @@ syntaxSpec = do
         (code, out) <- runOn [] ["--database", Text.unpack conn] "f = [maybeStatement|select $Just (nope :: text) from account|]\n"
         code `shouldBe` ExitFailure 1
         out `shouldSatisfy` ("column \"nope\" does not exist" `isInfixOf`)
+
+    -- The types come one per placeholder in the order the quoter sends them,
+    -- which lowering renumbers: this writes $2 before $1, so pairing them
+    -- with the numbering as written puts the label's text on tag.id and
+    -- rejects a statement that is perfectly fine.
+    itWithOuter "annotates the parameters in the order they are sent, not written" \conn ->
+        runInferred conn [] [inferredQuote "resultlessStatement" "insert into tag (label, id) values ($2, $1)" [text, int32] Nothing]
+            `shouldReturn` (ExitSuccess, "")
 #else
 syntaxSpec =
     itWithOuter "rejects Haskell targets, which upstream hasql-th does not accept" \conn -> do
@@ -230,12 +233,10 @@ syntaxSpec =
         out `shouldSatisfy` ("Fixture.hs:1:5" `isInfixOf`)
 #endif
 
-
 -- | Run with --nullability on one statement; return the exit code and output.
 nullability :: Text -> Text -> IO (ExitCode, String)
 nullability conn statement =
     runOn [] ["--database", Text.unpack conn, "--nullability"] ("f = [vectorStatement|" <> statement <> "|]\n")
-
 
 nullabilitySpec :: TestDef '[Text] ()
 nullabilitySpec = do
@@ -316,13 +317,12 @@ nullabilitySpec = do
         out `shouldSatisfy` ("column 1 (nickname)" `isInfixOf`)
         out `shouldNotSatisfy` ("column 2" `isInfixOf`)
 
-
--- | Run a checked quoter as a splice would. Outside GHC a failing splice only
--- says that it failed - the message goes to stderr - so the tests that expect
--- a failure pair it with the same statement passing when nothing is checked.
+{- | Run a checked quoter as a splice would. Outside GHC a failing splice only
+says that it failed - the message goes to stderr - so the tests that expect
+a failure pair it with the same statement passing when nothing is checked.
+-}
 quote :: QuasiQuoter -> String -> IO (Either String ())
 quote quoter sql = either (Left . show) (const (Right ())) <$> (try (void (runQ (quoteExp quoter sql))) :: IO (Either SomeException ()))
-
 
 thSpec :: TestDef '[Text] ()
 thSpec = do
@@ -356,12 +356,10 @@ thSpec = do
         setEnv "HASQL_CHECK_DATABASE_URL" "host=/nonexistent"
         quote Checked.vectorStatement "select nope :: text from account" `shouldReturn` Right ()
 
-
 -- | Run with --types on one quote; return the exit code and output.
 types :: Text -> Text -> Text -> IO (ExitCode, String)
 types conn quoter statement =
     runOn [] ["--database", Text.unpack conn, "--types"] ("f = [" <> quoter <> "|" <> statement <> "|]\n")
-
 
 typesSpec :: TestDef '[Text] ()
 typesSpec = do
@@ -435,11 +433,9 @@ typesSpec = do
         out `shouldSatisfy` ("column 1 (id) is annotated smallint, but is an integer" `isInfixOf`)
         out `shouldSatisfy` ("parameter $1" `isInfixOf`)
 
-
 -- | Run on a whole source with the given flags; return the exit code and output.
 checkSource :: Text -> [String] -> Text -> IO (ExitCode, String)
 checkSource conn flags = runOn [] (["--database", Text.unpack conn] <> flags)
-
 
 suppressionSpec :: TestDef '[Text] ()
 suppressionSpec = do
@@ -525,12 +521,11 @@ suppressionSpec = do
             checkSource conn ["--nullability", "--fail-on-warnings"] ("-- hasql-check: allow nullable(\"display name\")\n" <> source)
                 `shouldReturn` (ExitSuccess, "")
 
-
--- | The SQL the inferred quoters send for a statement, given the Postgres
--- types of its parameters and result columns.
+{- | The SQL the inferred quoters send for a statement, given the Postgres
+types of its parameters and result columns.
+-}
 sent :: Text -> [Text] -> [Text] -> Either String Text
 sent sql paramTypes columnTypes = render paramTypes columnTypes <$> Inferred.template sql
-
 
 piecesSpec :: Spec
 piecesSpec = do
@@ -591,37 +586,30 @@ piecesSpec = do
     it "rejects SQL it cannot parse" $
         Inferred.template "select from where" `shouldSatisfy` isLeft
 
-
 data PaymentState = PENDING | PAID | REFUNDED
     deriving stock (Eq, Show, Generic)
     deriving (Value) via PgEnum "payment_state" PaymentState
 
-
 newtype Qualified = Qualified PaymentState
     deriving stock (Eq, Show)
     deriving (Value) via PgEnum "public.\"payment_state\"" PaymentState
-
 
 -- The test database is "postgres".
 newtype InDatabase = InDatabase PaymentState
     deriving stock (Eq, Show)
     deriving (Value) via PgEnum "postgres.public.payment_state" PaymentState
 
-
 newtype Status = Status PaymentState
     deriving stock (Eq, Show)
     deriving (Value) via Domain "payment_status" PaymentState
-
 
 newtype Label = Label Text
     deriving stock (Eq, Show)
     deriving newtype (Value)
 
-
 newtype Cents = Cents Int64
     deriving stock (Eq, Show)
     deriving (Value) via Domain "cents" Int64
-
 
 -- | Run a statement on the test database.
 runStatement :: Text -> params -> Statement params result -> IO result
@@ -630,7 +618,6 @@ runStatement conn params statement = do
     result <- Connection.use c (Session.statement params statement)
     Connection.release c
     either (\e -> expectationFailure (show e) >> error "unreachable") pure result
-
 
 runtimeSpec :: TestDef '[Text] ()
 runtimeSpec = do
@@ -715,9 +702,9 @@ runtimeSpec = do
         runStatement conn ("blue" :: Text, 2 :: Int64) [Inferred.resultlessStatement|insert into tag (label, id) values ($1, $2)|]
             `shouldReturn` ()
 
-
--- | A quote as hasql-check-hie writes it: its SQL, and the qualified name and
--- Postgres type of each parameter and result column.
+{- | A quote as hasql-check-hie writes it: its SQL, and the qualified name and
+Postgres type of each parameter and result column.
+-}
 inferredQuote :: Text -> Text -> [Column] -> Maybe [Column] -> Text
 inferredQuote quoter sql params row =
     "{\"file\":\"src/Fixture.hs\",\"line\":3,\"column\":7,\"quoter\":\""
@@ -742,14 +729,11 @@ inferredQuote quoter sql params row =
             <> (if c.nullable then "true" else "false")
             <> "}"
 
-
 data Column = Column {haskell :: Text, postgres :: Text, nullable :: Bool, labels :: [Text]}
-
 
 -- | The same column, as a 'Maybe'.
 optional :: Column -> Column
 optional c = c{nullable = True}
-
 
 -- | Run with --inferred on the given quotes and flags.
 runInferred :: Text -> [String] -> [Text] -> IO (ExitCode, String)
@@ -760,12 +744,10 @@ runInferred conn args quotes' =
         (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" (["--database", Text.unpack conn, "--inferred", file] <> args)) ""
         pure (code, out <> err)
 
-
 int32, int64, text :: Column
 int32 = Column "GHC.Internal.Int.Int32" "int4" False []
 int64 = Column "GHC.Internal.Int.Int64" "int8" False []
 text = Column "Data.Text.Internal.Text" "text" False []
-
 
 inferredSpec :: TestDef '[Text] ()
 inferredSpec = do

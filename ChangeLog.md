@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.1.0
+
+The quoters of `Hasql.Check.Inferred.TH` now take the Haskell targets and
+`$1.$field` param fields of the `kronor-syntax` flag: the quoter builds the
+row decoder and the parameter encoder from them, and a record's columns are
+read at the type of the field each one names, so a statement may write the
+fields in any order. Add `rowsAffectedStatement`, and widen the tuple
+instances from eight components to twenty-four.
+
+`Target` and `Slots` carry the Postgres and the Haskell types at the type
+level, as `PostgresParams`, `PostgresColumns`, `HaskellParams` and
+`HaskellColumns`, so `hasql-check-hie` finds them in the `.hie` files.
+
+`--inferred` annotated the statement as written rather than as the quoter
+sends it, so a statement that writes its placeholders out of order, such as
+`set name = $2 where id = $1`, had its parameters' types paired with the
+wrong ones and was rejected. It now lowers the statement first, and reports
+an unused parameter by the number the statement was written with.
+
+Known gap: a param field reaches its type through `HasField`, whose
+`PgColumnType` stays stuck in the recorded type, so such a statement is
+reported as having no concrete type rather than being checked.
+
 ## 0.5.0.0
 
 Add `Hasql.Check.Inferred.TH`: quoters for statements without annotations,

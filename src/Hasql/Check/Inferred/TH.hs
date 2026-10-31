@@ -102,6 +102,11 @@ data Parsed = Parsed
     -- ^ One per SQL placeholder, in the order they are sent.
     , parsedArity :: Int
     -- ^ How many parameters the statement takes in Haskell.
+    , parsedUsed :: [Int]
+    {- ^ The parameters the statement actually refers to, numbered as it was
+    written: lowering renumbers the placeholders, so this is not the same
+    as the slots' positions.
+    -}
     , parsedTargets :: Maybe [Tgt]
     -- ^ Its result columns, unless they cannot be counted here: a @*@.
     }
@@ -187,11 +192,15 @@ parsed sql = do
     let (sent, lowered, slots') = lowerStmt forked
     t <- template (Text.decodeUtf8Lenient (renderStmt sent))
     let (slots, arity) = fromMaybe (plainSlots t) slots'
+        -- Where the statement was lowered the slots carry what each
+        -- placeholder was written as; where it was not, the template does.
+        used = maybe [i | ParamType i <- t.whole] (\_ -> [n | Slot n _ <- slots]) slots'
     pure
         Parsed
             { parsedTemplate = t
             , parsedSlots = slots
             , parsedArity = arity
+            , parsedUsed = used
             , parsedTargets = targets lowered
             }
 
