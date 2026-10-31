@@ -13,10 +13,13 @@ the wrong type, fails to compile.
 -}
 module Inferred.Shapes where
 
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
+#ifdef KRONOR_SYNTAX
+import Data.Int (Int32)
+import GHC.Generics (Generic)
+#endif
 import Data.Text (Text)
 import Data.Vector (Vector)
-import GHC.Generics (Generic)
 import Hasql.Check.Inferred (Value)
 import Hasql.Check.Inferred.TH
 import Hasql.Statement (Statement)
