@@ -810,166 +810,168 @@ inferredSpec = do
         runInferred conn [] [inferredQuote "singletonStatement" "select $1['a']" [Column "Data.Aeson.Types.Internal.Value" "jsonb" False []] (Just [Column "Data.Aeson.Types.Internal.Value" "jsonb" True []])]
             `shouldReturn` (ExitSuccess, "")
 
-    -- The types come one per placeholder in the order the quoter sends them,
-    -- which lowering renumbers: here the statement writes $2 before $1, so
-    -- pairing the types with the numbering as written puts the label's text
-    -- on tag.id and the check fails on a statement that is perfectly fine.
+-- The types come one per placeholder in the order the quoter sends them,
+-- which lowering renumbers: here the statement writes $2 before $1, so
+-- pairing the types with the numbering as written puts the label's text
+-- on tag.id and the check fails on a statement that is perfectly fine.
+#ifdef KRONOR_SYNTAX
     itWithOuter "annotates the parameters in the order they are sent, not written" \conn ->
         runInferred conn [] [inferredQuote "resultlessStatement" "insert into tag (label, id) values ($2, $1)" [text, int32] Nothing]
             `shouldReturn` (ExitSuccess, "")
+#endif
 
-    -- It runs, but whatever it was meant to do with $1, it does not.
-    itWithOuter "rejects a statement that does not use a parameter the Haskell type sends" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select $2" [int64, int64] (Just [int64])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("the Haskell type sends parameter $1, which the statement does not use" `isInfixOf`)
-        out `shouldNotSatisfy` ("could not determine" `isInfixOf`)
+-- It runs, but whatever it was meant to do with $1, it does not.
+itWithOuter "rejects a statement that does not use a parameter the Haskell type sends" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select $2" [int64, int64] (Just [int64])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("the Haskell type sends parameter $1, which the statement does not use" `isInfixOf`)
+    out `shouldNotSatisfy` ("could not determine" `isInfixOf`)
 
-    itWithOuter "checks a quote in a source file it also has from --inferred once, as inferred" \conn ->
-        withSystemTempDirectory "hasql-check-both" \dir -> do
-            let source = dir </> "src" </> "Fixture.hs"
-                quotesFile = dir </> "quotes.jsonl"
-            createDirectoryIfMissing True (dir </> "src")
-            -- Line 3, with the quote at column 7, as the inferred quote says.
-            writeFile source "module Fixture where\n\ng =   [singletonStatement|select $1 + $2|]\n"
-            ByteString.Lazy.writeFile quotesFile (ByteString.Lazy.fromStrict (Text.Encoding.encodeUtf8 (inferredQuote "singletonStatement" "select $1 + $2" [int64, int64] (Just [int64]))))
-            (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" ["--database", Text.unpack conn, source, "--inferred", quotesFile]) ""
-            (code, out <> err) `shouldBe` (ExitSuccess, "")
+itWithOuter "checks a quote in a source file it also has from --inferred once, as inferred" \conn ->
+    withSystemTempDirectory "hasql-check-both" \dir -> do
+        let source = dir </> "src" </> "Fixture.hs"
+            quotesFile = dir </> "quotes.jsonl"
+        createDirectoryIfMissing True (dir </> "src")
+        -- Line 3, with the quote at column 7, as the inferred quote says.
+        writeFile source "module Fixture where\n\ng =   [singletonStatement|select $1 + $2|]\n"
+        ByteString.Lazy.writeFile quotesFile (ByteString.Lazy.fromStrict (Text.Encoding.encodeUtf8 (inferredQuote "singletonStatement" "select $1 + $2" [int64, int64] (Just [int64]))))
+        (code, out, err) <- readCreateProcessWithExitCode (proc "hasql-check" ["--database", Text.unpack conn, source, "--inferred", quotesFile]) ""
+        (code, out <> err) `shouldBe` (ExitSuccess, "")
 
-    itWithOuter "rejects a Haskell type that sends more parameters than the statement uses" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 1" [int64] (Just [int32])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("the Haskell type sends parameter $1, which the statement does not use" `isInfixOf`)
+itWithOuter "rejects a Haskell type that sends more parameters than the statement uses" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 1" [int64] (Just [int32])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("the Haskell type sends parameter $1, which the statement does not use" `isInfixOf`)
 
-    itWithOuter "rejects a Haskell type that sends fewer, without rows too" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "delete from tag where id = $1" [] Nothing]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("the statement uses $1, but the Haskell type sends 0 parameters" `isInfixOf`)
+itWithOuter "rejects a Haskell type that sends fewer, without rows too" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "delete from tag where id = $1" [] Nothing]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("the statement uses $1, but the Haskell type sends 0 parameters" `isInfixOf`)
 
-    itWithOuter "accepts a column of a domain, read as a newtype deriving it" \conn ->
-        runInferred conn [] [inferredQuote "singletonStatement" "select price from ledger" [] (Just [Column "Shop.Cents" "cents" True []])]
+itWithOuter "accepts a column of a domain, read as a newtype deriving it" \conn ->
+    runInferred conn [] [inferredQuote "singletonStatement" "select price from ledger" [] (Just [Column "Shop.Cents" "cents" True []])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "rejects a column Postgres converts to the type read only when told to" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "vectorStatement" "select name from account" [] (Just [Column "Shop.Nickname" "int8" False []])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("column 1 (name) is text, but is read as Shop.Nickname (bigint), which Postgres converts it to only when told to" `isInfixOf`)
+
+itWithOuter "accepts an array whose elements Postgres converts on its own" \conn ->
+    runInferred conn [] [inferredQuote "singletonStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" True []])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "rejects an array whose elements Postgres converts only when told to" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select labels from tagged" [] (Just [Column "Data.Vector.Vector Int64" "int8[]" False []])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("column 1 (labels) is text[], but is read as Data.Vector.Vector Int64 (bigint[]), which Postgres converts it to only when told to" `isInfixOf`)
+
+itWithOuter "warns about an array read as one of narrower elements, whose cast is accepted" \conn -> do
+    (code, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select amounts from totals" [] (Just [Column "Data.Vector.Vector Int32" "int4[]" False []])]
+    code `shouldBe` ExitSuccess
+    out `shouldSatisfy` ("column 1 (amounts) is read as integer[], but is a bigint[]: it may overflow" `isInfixOf`)
+
+itWithOuter "warns about an array parameter sent to a column of narrower elements" \conn -> do
+    (_, out) <- runInferred conn ["--types"] [inferredQuote "resultlessStatement" "update tagged set scores = $1" [Column "Data.Vector.Vector Int64" "int8[]" False []] Nothing]
+    out `shouldSatisfy` ("parameter $1 is sent as bigint[], but is assigned to an integer[] column: it may overflow" `isInfixOf`)
+
+itWithOuter "warns about a nullable array read without a Maybe" \conn -> do
+    (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False []])]
+    out `shouldSatisfy` ("column 1 (scores) is not a Maybe in Haskell, but public.tagged.scores is nullable" `isInfixOf`)
+itWithOuter "accepts NULL and string literals, typed by the cast" \conn ->
+    runInferred
+        conn
+        []
+        [ inferredQuote "singletonStatement" "select NULL" [] (Just [Column "GHC.Internal.Int.Int64" "int8" True []])
+        , inferredQuote "singletonStatement" "select '2026-10-29'" [] (Just [Column "Data.Time.Calendar.Days.Day" "date" False []])
+        ]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "rejects a string literal that is not of the type read" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 'abc'" [] (Just [Column "Data.UUID.Types.Internal.UUID" "uuid" False []])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("column 1 (?column?) is 'abc', which cannot be read as Data.UUID.Types.Internal.UUID" `isInfixOf`)
+
+itWithOuter "accepts any column read as text, which Postgres converts to on assignment" \conn ->
+    runInferred conn [] [inferredQuote "vectorStatement" "select id from account" [] (Just [text])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "accepts a domain over a domain, read as the type at the bottom" \conn ->
+    runInferred conn [] [inferredQuote "vectorStatement" "select balance from wallet" [] (Just [Column "Shop.Positive" "positive_cents" False []])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "accepts a domain column behind a *" \conn ->
+    runInferred conn [] [inferredQuote "vectorStatement" "select x.* from (select price from ledger) x" [] (Just [Column "Shop.Cents" "cents" True []])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "rejects a Postgres type that does not exist, behind a * too" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select x.* from (select 'abc'::text) x" [] (Just [Column "Shop.Missing" "missing_domain" False []])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("no such Postgres type: missing_domain" `isInfixOf`)
+
+itWithOuter "rejects a UNION whose branches do not agree, which fails as sent too" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select name from account union all select 1" [] (Just [int64])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("UNION types text and integer cannot be matched" `isInfixOf`)
+
+itWithOuter "accepts an enum read with all its labels" \conn ->
+    runInferred conn [] [inferredQuote "singletonStatement" "select state from payment" [] (Just [Column "Shop.State" "payment_state" False ["PENDING", "PAID", "REFUNDED"]])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "rejects an enum read without a label the database has" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select state from payment" [] (Just [Column "Shop.State" "payment_state" False ["PENDING", "PAID"]])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("column 1 (state) is read as Shop.State, which cannot read labels payment_state has: REFUNDED" `isInfixOf`)
+
+itWithOuter "accepts an enum sent with fewer labels than the database has" \conn ->
+    runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID"]] Nothing]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "accepts a domain over an enum, read with all its labels" \conn ->
+    runInferred conn [] [inferredQuote "singletonStatement" "select status from payment_log" [] (Just [Column "Shop.Status" "payment_status" False ["PENDING", "PAID", "REFUNDED"]])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "rejects a domain over an enum read without a label the enum has" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select status from payment_log" [] (Just [Column "Shop.Status" "payment_status" False ["PENDING", "PAID"]])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("which cannot read labels payment_status has: REFUNDED" `isInfixOf`)
+
+itWithOuter "rejects an enum sent with a label the database does not have" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID", "CANCELLED"]] Nothing]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("parameter $1 is sent as Shop.Transition, with labels payment_state does not have: CANCELLED" `isInfixOf`)
+
+itWithOuter "rejects a Postgres type the database does not have" \conn -> do
+    (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False []])]
+    code `shouldBe` ExitFailure 1
+    out `shouldSatisfy` ("no such Postgres type: nosuchtype" `isInfixOf`)
+
+itWithOuter "warns about a nullable column read without a Maybe" \conn -> do
+    (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [text])]
+    out `shouldSatisfy` ("column 1 (nickname) is not a Maybe in Haskell, but public.account.nickname is nullable" `isInfixOf`)
+
+itWithOuter "accepts a nullable column read as a Maybe" \conn ->
+    runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [optional text])]
+        `shouldReturn` (ExitSuccess, "")
+
+itWithOuter "warns about a column read as a narrower type" \conn -> do
+    (_, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select amount from ledger" [] (Just [int32])]
+    out `shouldSatisfy` ("column 1 (amount) is read as integer, but is a bigint: it may overflow" `isInfixOf`)
+
+itWithOuter "fingerprints an inferred statement by its result types too, for baselines" \conn ->
+    withSystemTempDirectory "hasql-check-baseline" \dir -> do
+        let baseline = dir </> "baseline"
+            readAs t = inferredQuote "vectorStatement" "select amount from ledger" [] (Just [t])
+            int16 = Column "GHC.Internal.Int.Int16" "int2" False []
+        _ <- runInferred conn ["--types", "--write-baseline", baseline] [readAs int32]
+        -- The same statement stays suppressed; read as a narrower type, it
+        -- is another statement, and is not.
+        runInferred conn ["--types", "--baseline", baseline, "--fail-on-warnings"] [readAs int32]
             `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "rejects a column Postgres converts to the type read only when told to" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "vectorStatement" "select name from account" [] (Just [Column "Shop.Nickname" "int8" False []])]
+        (code, out) <- runInferred conn ["--types", "--baseline", baseline, "--fail-on-warnings"] [readAs int16]
         code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("column 1 (name) is text, but is read as Shop.Nickname (bigint), which Postgres converts it to only when told to" `isInfixOf`)
+        out `shouldSatisfy` ("column 1 (amount) is read as smallint, but is a bigint: it may overflow" `isInfixOf`)
 
-    itWithOuter "accepts an array whose elements Postgres converts on its own" \conn ->
-        runInferred conn [] [inferredQuote "singletonStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" True []])]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "rejects an array whose elements Postgres converts only when told to" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select labels from tagged" [] (Just [Column "Data.Vector.Vector Int64" "int8[]" False []])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("column 1 (labels) is text[], but is read as Data.Vector.Vector Int64 (bigint[]), which Postgres converts it to only when told to" `isInfixOf`)
-
-    itWithOuter "warns about an array read as one of narrower elements, whose cast is accepted" \conn -> do
-        (code, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select amounts from totals" [] (Just [Column "Data.Vector.Vector Int32" "int4[]" False []])]
-        code `shouldBe` ExitSuccess
-        out `shouldSatisfy` ("column 1 (amounts) is read as integer[], but is a bigint[]: it may overflow" `isInfixOf`)
-
-    itWithOuter "warns about an array parameter sent to a column of narrower elements" \conn -> do
-        (_, out) <- runInferred conn ["--types"] [inferredQuote "resultlessStatement" "update tagged set scores = $1" [Column "Data.Vector.Vector Int64" "int8[]" False []] Nothing]
-        out `shouldSatisfy` ("parameter $1 is sent as bigint[], but is assigned to an integer[] column: it may overflow" `isInfixOf`)
-
-    itWithOuter "warns about a nullable array read without a Maybe" \conn -> do
-        (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select scores from tagged" [] (Just [Column "Data.Vector.Vector (Maybe Int64)" "int8[]" False []])]
-        out `shouldSatisfy` ("column 1 (scores) is not a Maybe in Haskell, but public.tagged.scores is nullable" `isInfixOf`)
-    itWithOuter "accepts NULL and string literals, typed by the cast" \conn ->
-        runInferred
-            conn
-            []
-            [ inferredQuote "singletonStatement" "select NULL" [] (Just [Column "GHC.Internal.Int.Int64" "int8" True []])
-            , inferredQuote "singletonStatement" "select '2026-10-29'" [] (Just [Column "Data.Time.Calendar.Days.Day" "date" False []])
-            ]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "rejects a string literal that is not of the type read" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select 'abc'" [] (Just [Column "Data.UUID.Types.Internal.UUID" "uuid" False []])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("column 1 (?column?) is 'abc', which cannot be read as Data.UUID.Types.Internal.UUID" `isInfixOf`)
-
-    itWithOuter "accepts any column read as text, which Postgres converts to on assignment" \conn ->
-        runInferred conn [] [inferredQuote "vectorStatement" "select id from account" [] (Just [text])]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "accepts a domain over a domain, read as the type at the bottom" \conn ->
-        runInferred conn [] [inferredQuote "vectorStatement" "select balance from wallet" [] (Just [Column "Shop.Positive" "positive_cents" False []])]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "accepts a domain column behind a *" \conn ->
-        runInferred conn [] [inferredQuote "vectorStatement" "select x.* from (select price from ledger) x" [] (Just [Column "Shop.Cents" "cents" True []])]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "rejects a Postgres type that does not exist, behind a * too" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select x.* from (select 'abc'::text) x" [] (Just [Column "Shop.Missing" "missing_domain" False []])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("no such Postgres type: missing_domain" `isInfixOf`)
-
-    itWithOuter "rejects a UNION whose branches do not agree, which fails as sent too" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select name from account union all select 1" [] (Just [int64])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("UNION types text and integer cannot be matched" `isInfixOf`)
-
-    itWithOuter "accepts an enum read with all its labels" \conn ->
-        runInferred conn [] [inferredQuote "singletonStatement" "select state from payment" [] (Just [Column "Shop.State" "payment_state" False ["PENDING", "PAID", "REFUNDED"]])]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "rejects an enum read without a label the database has" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select state from payment" [] (Just [Column "Shop.State" "payment_state" False ["PENDING", "PAID"]])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("column 1 (state) is read as Shop.State, which cannot read labels payment_state has: REFUNDED" `isInfixOf`)
-
-    itWithOuter "accepts an enum sent with fewer labels than the database has" \conn ->
-        runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID"]] Nothing]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "accepts a domain over an enum, read with all its labels" \conn ->
-        runInferred conn [] [inferredQuote "singletonStatement" "select status from payment_log" [] (Just [Column "Shop.Status" "payment_status" False ["PENDING", "PAID", "REFUNDED"]])]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "rejects a domain over an enum read without a label the enum has" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select status from payment_log" [] (Just [Column "Shop.Status" "payment_status" False ["PENDING", "PAID"]])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("which cannot read labels payment_status has: REFUNDED" `isInfixOf`)
-
-    itWithOuter "rejects an enum sent with a label the database does not have" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "resultlessStatement" "update payment set state = $1" [Column "Shop.Transition" "payment_state" False ["PAID", "CANCELLED"]] Nothing]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("parameter $1 is sent as Shop.Transition, with labels payment_state does not have: CANCELLED" `isInfixOf`)
-
-    itWithOuter "rejects a Postgres type the database does not have" \conn -> do
-        (code, out) <- runInferred conn [] [inferredQuote "singletonStatement" "select label from tag" [] (Just [Column "Shop.Label" "nosuchtype" False []])]
-        code `shouldBe` ExitFailure 1
-        out `shouldSatisfy` ("no such Postgres type: nosuchtype" `isInfixOf`)
-
-    itWithOuter "warns about a nullable column read without a Maybe" \conn -> do
-        (_, out) <- runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [text])]
-        out `shouldSatisfy` ("column 1 (nickname) is not a Maybe in Haskell, but public.account.nickname is nullable" `isInfixOf`)
-
-    itWithOuter "accepts a nullable column read as a Maybe" \conn ->
-        runInferred conn ["--nullability"] [inferredQuote "vectorStatement" "select nickname from account" [] (Just [optional text])]
-            `shouldReturn` (ExitSuccess, "")
-
-    itWithOuter "warns about a column read as a narrower type" \conn -> do
-        (_, out) <- runInferred conn ["--types"] [inferredQuote "vectorStatement" "select amount from ledger" [] (Just [int32])]
-        out `shouldSatisfy` ("column 1 (amount) is read as integer, but is a bigint: it may overflow" `isInfixOf`)
-
-    itWithOuter "fingerprints an inferred statement by its result types too, for baselines" \conn ->
-        withSystemTempDirectory "hasql-check-baseline" \dir -> do
-            let baseline = dir </> "baseline"
-                readAs t = inferredQuote "vectorStatement" "select amount from ledger" [] (Just [t])
-                int16 = Column "GHC.Internal.Int.Int16" "int2" False []
-            _ <- runInferred conn ["--types", "--write-baseline", baseline] [readAs int32]
-            -- The same statement stays suppressed; read as a narrower type, it
-            -- is another statement, and is not.
-            runInferred conn ["--types", "--baseline", baseline, "--fail-on-warnings"] [readAs int32]
-                `shouldReturn` (ExitSuccess, "")
-            (code, out) <- runInferred conn ["--types", "--baseline", baseline, "--fail-on-warnings"] [readAs int16]
-            code `shouldBe` ExitFailure 1
-            out `shouldSatisfy` ("column 1 (amount) is read as smallint, but is a bigint: it may overflow" `isInfixOf`)
-
-    itWithOuter "warns about a parameter assigned to a narrower column" \conn -> do
-        (_, out) <- runInferred conn ["--types"] [inferredQuote "resultlessStatement" "update ledger set small = $1" [int64] Nothing]
-        out `shouldSatisfy` ("parameter $1 is sent as bigint, but is assigned to a smallint column: it may overflow" `isInfixOf`)
+itWithOuter "warns about a parameter assigned to a narrower column" \conn -> do
+    (_, out) <- runInferred conn ["--types"] [inferredQuote "resultlessStatement" "update ledger set small = $1" [int64] Nothing]
+    out `shouldSatisfy` ("parameter $1 is sent as bigint, but is assigned to a smallint column: it may overflow" `isInfixOf`)

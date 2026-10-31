@@ -38,7 +38,7 @@ import Hasql.Check (parsePlainStmt, parseStmt, quoterSettings, renderStmt)
 import Hasql.Check.Annotate (annotate, typename, untypedLiterals)
 import Hasql.Check.Finding (Finding (..), statementHash)
 import Hasql.Check.Inferred (Template (..), render)
-import Hasql.Check.Inferred.TH (Parsed (..), Slot (..), parsed)
+import Hasql.Check.Inferred.TH (Parsed (..), parsed)
 import Hasql.Check.Nullability (Catalogue, query)
 import Hasql.Check.Nullability qualified as Nullability
 import Hasql.Check.Types qualified as Types
@@ -191,7 +191,7 @@ checkSent conn q = case (,,) <$> parsed q.sql <*> traverse postgresType q.params
                         -- In the numbering the statement was written in,
                         -- which lowering renumbers: each slot knows the
                         -- parameter it came from.
-                        let used = [n | Slot n _ <- p.parsedSlots]
+                        let used = p.parsedUsed
                             sends = length q.params
                             paramErrors =
                                 [ concat ["the Haskell type sends parameter $", show n, ", which the statement does not use"]
