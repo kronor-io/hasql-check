@@ -1,25 +1,26 @@
--- |
--- Module      : Hasql.Check.Plugin
--- Copyright   : (c) 2026 Kronor.io
---
--- License     : BSD-3-Clause
--- Maintainer  : lorenzo@kronor.io
--- Stability   : experimental
--- Portability : GHC
---
--- A GHC plugin that checks the statements of "Hasql.Check.Inferred.TH"
--- against a database while their module compiles, as "Hasql.Check.TH" does
--- for hasql-th's: once GHC has type-checked the module, the types each
--- statement is used at are known, and the plugin checks it as
--- @hasql-check --inferred@ would. A statement that does not fit the schema
--- is a compile error at its quote.
---
--- > {-# OPTIONS_GHC -fplugin=Hasql.Check.Plugin #-}
---
--- or @ghc-options: -fplugin=Hasql.Check.Plugin@ for a whole package, which
--- depends on @hasql-check-ghc@. It is configured as "Hasql.Check.TH" is, by
--- @HASQL_CHECK_DATABASE_URL@ and the rest (see "Hasql.Check.Compile"); with
--- no database set, it checks nothing.
+{- |
+Module      : Hasql.Check.Plugin
+Copyright   : (c) 2026 Kronor.io
+
+License     : BSD-3-Clause
+Maintainer  : lorenzo@kronor.io
+Stability   : experimental
+Portability : GHC
+
+A GHC plugin that checks the statements of "Hasql.Check.Inferred.TH"
+against a database while their module compiles, as "Hasql.Check.TH" does
+for hasql-th's: once GHC has type-checked the module, the types each
+statement is used at are known, and the plugin checks it as
+@hasql-check --inferred@ would. A statement that does not fit the schema
+is a compile error at its quote.
+
+> {\-# OPTIONS_GHC -fplugin=Hasql.Check.Plugin #-\}
+
+or @ghc-options: -fplugin=Hasql.Check.Plugin@ for a whole package, which
+depends on @hasql-check-ghc@. It is configured as "Hasql.Check.TH" is, by
+@HASQL_CHECK_DATABASE_URL@ and the rest (see "Hasql.Check.Compile"); with
+no database set, it checks nothing.
+-}
 module Hasql.Check.Plugin (plugin) where
 
 import Control.Monad (forM_, unless)
@@ -51,7 +52,6 @@ import Hasql.Check.Ghc.Source (Column (..), Quote (..), Statement (..), Ty (..),
 import Hasql.Check.Inferred.Quote (Inferred (Inferred), checkInferred)
 import Hasql.Check.Inferred.Quote qualified as Quote
 
-
 plugin :: Plugin
 plugin =
     defaultPlugin
@@ -61,14 +61,13 @@ plugin =
         , pluginRecompile = \_ -> recompile <$> readConfig
         }
 
-
--- | A module is checked again when what it was checked with changes, as a
--- different database; a change of schema rechecks only the modules with
--- statements, which depend on the schema file.
+{- | A module is checked again when what it was checked with changes, as a
+different database; a change of schema rechecks only the modules with
+statements, which depend on the schema file.
+-}
 recompile :: Config -> PluginRecompile
 recompile config =
     MaybeRecompile (fingerprintString (show (config.databaseUrl, config.schemaFile, config.nullability, config.types, config.baseline)))
-
 
 check :: TcGblEnv -> TcM ()
 check env = do
@@ -87,7 +86,6 @@ check env = do
                     Just (Left err) -> failAt s err
                     Just (Right statement) -> checkStatement config url s statement
 
-
 checkStatement :: Config -> String -> RealSrcSpan -> Statement -> TcM ()
 checkStatement config url s statement = do
     let file = unpackFS (srcSpanFile s)
@@ -101,7 +99,6 @@ checkStatement config url s statement = do
         Right (Right (found, fingerprint)) -> liftIO do
             messages <- warnings config rules file statement.line fingerprint found
             forM_ messages (warning file (statement.line, statement.quote.column))
-
 
 -- | The statement as @hasql-check --inferred@ reads it.
 toInferred :: FilePath -> Statement -> Inferred
@@ -117,7 +114,6 @@ toInferred file statement =
   where
     column c = Quote.Column (Text.pack c.haskellType) (Text.pack c.postgres) (map Text.pack c.labels) c.nullable
 
-
 failAt :: RealSrcSpan -> String -> TcM ()
 failAt s message =
     addErrAt (RealSrcSpan s mempty) (TcRnUnknownMessage (mkSimpleUnknownDiagnostic (mkPlainError noHints layout)))
@@ -127,13 +123,12 @@ failAt s message =
         first : rest -> vcat [text first, nest 2 (vcat (map text rest))]
         [] -> empty
 
-
 -- * The statements in a type-checked module
 
-
--- | The quasi-quotes of a renamed module, with their spans and the line each
--- starts on.
-quasiQuotes :: Data a => a -> [(RealSrcSpan, Quote)]
+{- | The quasi-quotes of a renamed module, with their spans and the line each
+starts on.
+-}
+quasiQuotes :: (Data a) => a -> [(RealSrcSpan, Quote)]
 quasiQuotes x = here <> concat (gmapQ quasiQuotes x)
   where
     here = case cast x of
@@ -142,9 +137,9 @@ quasiQuotes x = here <> concat (gmapQ quasiQuotes x)
                 [(s, Quote (srcSpanStartCol s) (getOccString quoter) (unpackFS body))]
         _ -> []
 
-
--- | The innermost quote whose span holds the given span - that of the code it
--- was spliced into - with the line it starts on.
+{- | The innermost quote whose span holds the given span - that of the code it
+was spliced into - with the line it starts on.
+-}
 quoteAround :: [(RealSrcSpan, Quote)] -> RealSrcSpan -> Maybe (Int, Quote)
 quoteAround quotes s =
     case [(srcSpanStartLine o, q) | (o, q) <- around, all (\(o', _) -> o' `containsSpan` o) around] of
@@ -153,30 +148,28 @@ quoteAround quotes s =
   where
     around = filter (\(o, _) -> o `containsSpan` s) quotes
 
-
--- | Each use of 'Hasql.Check.Inferred.statement' or
--- 'Hasql.Check.Inferred.resultless' - each quote - with its span and the
--- types of the dictionaries it is passed: GHC has worked out the types it is
--- used at.
-statements :: Data a => a -> [(RealSrcSpan, [Type])]
+{- | Each use of 'Hasql.Check.Inferred.statement' or
+'Hasql.Check.Inferred.resultless' - each quote - with its span and the
+types of the dictionaries it is passed: GHC has worked out the types it is
+used at.
+-}
+statements :: (Data a) => a -> [(RealSrcSpan, [Type])]
 statements x = here <> concat (gmapQ statements x)
   where
     here = case cast x of
         Just (L l (XExpr (WrapExpr w (HsVar _ (L _ v)))) :: LHsExpr GhcTc)
-            | getOccString v `elem` ["statement", "resultless"]
+            | getOccString v `elem` ["statement", "statementWith", "statementRow", "resultless", "resultlessWith", "rowsAffected", "rowsAffectedWith"]
             , Just m <- nameModule_maybe (varName v)
             , moduleNameString (moduleName m) == "Hasql.Check.Inferred"
             , RealSrcSpan s _ <- locA l ->
                 [(s, dictionaries w)]
         _ -> []
 
-
 dictionaries :: HsWrapper -> [Type]
 dictionaries = \case
     WpCompose a b -> dictionaries a <> dictionaries b
     WpEvApp (EvExpr e) -> [exprType e]
     _ -> []
-
 
 -- | A type, as "Hasql.Check.Ghc.Source" reads it.
 fromType :: Type -> Ty

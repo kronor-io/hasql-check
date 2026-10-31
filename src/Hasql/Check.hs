@@ -1,13 +1,14 @@
 {-# LANGUAGE CPP #-}
 
--- |
--- Module      : Hasql.Check
--- Copyright   : (c) 2022 Kronor.io
---
--- License     : BSD-3-Clause
--- Maintainer  : lorenzo@kronor.io
--- Stability   : experimental
--- Portability : GHC
+{- |
+Module      : Hasql.Check
+Copyright   : (c) 2022 Kronor.io
+
+License     : BSD-3-Clause
+Maintainer  : lorenzo@kronor.io
+Stability   : experimental
+Portability : GHC
+-}
 module Hasql.Check where
 
 import Data.ByteString (ByteString)
@@ -18,30 +19,35 @@ import PostgresqlSyntax qualified as Ast
 import Pqi qualified
 import Prelude
 
-
--- | Turn the SQL text inside a quasiquote into the SQL the splice actually
--- sends to Postgres, mirroring @Hasql.TH.expPreparableStmtAstParser@ composed
--- with @Hasql.TH.Extraction.Exp.sql@ line for line. Rendering at 'mempty'
--- drops the nullability markers.
+{- | Turn the SQL text inside a quasiquote into the SQL the splice actually
+sends to Postgres, mirroring @Hasql.TH.expPreparableStmtAstParser@ composed
+with @Hasql.TH.Extraction.Exp.sql@ line for line. Rendering at 'mempty'
+drops the nullability markers.
+-}
 renderSql :: Text -> Either String ByteString
 renderSql sql = renderStmt <$> parseStmt sql
-
 
 -- | The statement in a quasiquote, as the splice would render it.
 parseStmt :: Text -> Either String Ast.PreparableStmt
 parseStmt sql = either (Left . Text.unpack) (Right . lowerAst) (Ast.parse quoterSettings sql)
 
+{- | A statement in plain SQL, as Postgres reads it, whatever syntax this
+build takes in hasql-th's quotes: for the quoters of
+"Hasql.Check.Inferred.TH", and the annotated statements that stand for
+theirs, which hasql-th's nullability markers may annotate.
 
--- | A statement in plain SQL, as Postgres reads it, whatever syntax this
--- build takes in hasql-th's quotes: for the quoters of
--- "Hasql.Check.Inferred.TH", and the annotated statements that stand for
--- theirs, which hasql-th's nullability markers may annotate.
---
--- Not lowered: Kronor's fork numbers the placeholders afresh as it lowers
--- its parameter fields, which would turn a lone @$2@ into @$1@.
+Not lowered: Kronor's fork numbers the placeholders afresh as it lowers
+its parameter fields, which would turn a lone @$2@ into @$1@.
+-}
 parsePlainStmt :: Bool -> Text -> Either String Ast.PreparableStmt
 parsePlainStmt markers sql = either (Left . Text.unpack) Right (Ast.parse (Ast.nullabilityMarkers markers) sql)
 
+{- | A statement in whatever syntax this build's quotes take, left exactly as
+parsed: the quoters of "Hasql.Check.Inferred.TH" read Kronor's Haskell
+targets off it, and lower it themselves.
+-}
+parseForkStmt :: Text -> Either String Ast.PreparableStmt
+parseForkStmt sql = either (Left . Text.unpack) Right (Ast.parse quoterSettings sql)
 
 renderStmt :: Ast.PreparableStmt -> ByteString
 renderStmt = Text.encodeUtf8 . Ast.toText mempty
@@ -81,11 +87,9 @@ lowerAst = id
 
 #endif
 
-
 prepare :: Pqi.Connection -> Text -> Text -> IO (Either String ())
 prepare conn stmtName unParsedStmt =
     either (pure . Left) (prepareStmt conn (Text.encodeUtf8 stmtName)) (parseStmt unParsedStmt)
-
 
 -- | Prepare a statement under a name, returning the server's error if it fails.
 prepareStmt :: Pqi.Connection -> ByteString -> Ast.PreparableStmt -> IO (Either String ())
