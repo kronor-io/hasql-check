@@ -55,6 +55,8 @@ module Hasql.Check.Inferred (
 
     -- * Targets and slots, for the quoters' own statements
     Target (..),
+    HaskellColumns,
+    HaskellParams,
     targetPure,
     targetColumn,
     targetAp,
@@ -906,6 +908,20 @@ class (KnownSymbols ps) => PostgresParams ps
 
 instance (KnownSymbols ps) => PostgresParams ps
 
+{- | The Haskell types a statement's parameters are sent from, for
+@hasql-check-hie@ to find; see 'PostgresParams'.
+-}
+class HaskellParams (hs :: [Type])
+
+instance HaskellParams hs
+
+{- | The Haskell types a statement's result columns are read as; see
+'PostgresParams'.
+-}
+class HaskellColumns (hs :: [Type])
+
+instance HaskellColumns hs
+
 -- | The Postgres types of a statement's result columns; see 'PostgresParams'.
 class (KnownSymbols cs) => PostgresColumns cs
 
@@ -992,47 +1008,53 @@ the Postgres types and enum labels its columns are read as. Kronor's
 Haskell targets need it: only the statement knows the row's shape, and the
 column types are the constructor's fields'.
 -}
-newtype Target (cs :: [Symbol]) (ls :: [[Symbol]]) r = Target {targetRow :: D.Row r}
+newtype Target (cs :: [Symbol]) (ls :: [[Symbol]]) (hs :: [Type]) r = Target {targetRow :: D.Row r}
 
 -- | A target that reads no columns: a constructor, before its arguments.
-targetPure :: r -> Target '[] '[] r
+targetPure :: r -> Target '[] '[] '[] r
 targetPure = Target . pure
 
 -- | One column, read as whatever Haskell reads it as.
-targetColumn :: forall a. (Column a) => Target '[PgColumnType a] '[PgColumnLabels a] a
+targetColumn :: forall a. (Column a) => Target '[PgColumnType a] '[PgColumnLabels a] '[a] a
 targetColumn = Target (D.column decodeColumn)
 
 -- | A constructor applied to one more column, appending its type.
-targetAp :: Target cs ls (a -> b) -> Target ds ms a -> Target (Append cs ds) (Append ls ms) b
+targetAp :: Target cs ls hs (a -> b) -> Target ds ms is a -> Target (Append cs ds) (Append ls ms) (Append hs is) b
 targetAp (Target f) (Target x) = Target (f <*> x)
 
 {- | A parameter encoder the quoter built out of a statement's placeholders,
 carrying the Postgres types they are sent as. Kronor's @$1.$field@ param
 fields need it: each sends a field of a parameter, not the whole of it.
 -}
-newtype Slots (ps :: [Symbol]) (ls :: [[Symbol]]) p = Slots {slotsParams :: E.Params p}
+newtype Slots (ps :: [Symbol]) (ls :: [[Symbol]]) (hs :: [Type]) p = Slots {slotsParams :: E.Params p}
 
 -- | No parameters.
-slotsNone :: Slots '[] '[] p
+slotsNone :: Slots '[] '[] '[] p
 slotsNone = Slots mempty
 
 -- | One parameter slot, sending what the projection picks out.
-slotsOne :: forall a p. (Column a) => (p -> a) -> Slots '[PgColumnType a] '[PgColumnLabels a] p
+slotsOne :: forall a p. (Column a) => (p -> a) -> Slots '[PgColumnType a] '[PgColumnLabels a] '[a] p
 slotsOne f = Slots (f >$< E.param encodeColumn)
 
 -- | One more slot, appending its type.
-slotsAp :: Slots ps ls p -> Slots qs ms p -> Slots (Append ps qs) (Append ls ms) p
+slotsAp :: Slots ps ls hs p -> Slots qs ms is p -> Slots (Append ps qs) (Append ls ms) (Append hs is) p
 slotsAp (Slots a) (Slots b) = Slots (a <> b)
 
 {- | A statement returning rows, whose decoder and encoder the quoter built
 because the statement's own syntax decides them.
 -}
 statementWith ::
-    forall p r a ps cs pl cl.
-    (PostgresParams ps, PostgresColumns cs, PostgresParamLabels pl, PostgresColumnLabels cl) =>
+    forall p r a ps cs pl cl ph ch.
+    ( PostgresParams ps
+    , PostgresColumns cs
+    , PostgresParamLabels pl
+    , PostgresColumnLabels cl
+    , HaskellParams ph
+    , HaskellColumns ch
+    ) =>
     Template ->
-    Slots ps pl p ->
-    Target cs cl r ->
+    Slots ps pl ph p ->
+    Target cs cl ch r ->
     (D.Row r -> D.Result a) ->
     Statement p a
 statementWith template slots target result =
@@ -1045,7 +1067,7 @@ statementWith template slots target result =
 type decides: a target list the quoter cannot count, such as a @*@.
 -}
 statementRow ::
-    forall p r a ps cs pl cl.
+    forall p r a ps cs pl cl ph.
     ( Row r
     , cs ~ PgColumnTypes r
     , cl ~ PgColumnLabelLists r
@@ -1053,9 +1075,10 @@ statementRow ::
     , PostgresColumns cs
     , PostgresParamLabels pl
     , PostgresColumnLabels cl
+    , HaskellParams ph
     ) =>
     Template ->
-    Slots ps pl p ->
+    Slots ps pl ph p ->
     (D.Row r -> D.Result a) ->
     Statement p a
 statementRow template slots result =
@@ -1066,20 +1089,20 @@ statementRow template slots result =
 
 -- | A statement returning no rows, whose encoder the quoter built.
 resultlessWith ::
-    forall p ps pl.
-    (PostgresParams ps, PostgresParamLabels pl) =>
+    forall p ps pl ph.
+    (PostgresParams ps, PostgresParamLabels pl, HaskellParams ph) =>
     Template ->
-    Slots ps pl p ->
+    Slots ps pl ph p ->
     Statement p ()
 resultlessWith template slots =
     Statement.preparable (render (symbolTexts @ps) [] template) (slotsParams slots) D.noResult
 
 -- | A statement counting the rows it affected, whose encoder the quoter built.
 rowsAffectedWith ::
-    forall p ps pl.
-    (PostgresParams ps, PostgresParamLabels pl) =>
+    forall p ps pl ph.
+    (PostgresParams ps, PostgresParamLabels pl, HaskellParams ph) =>
     Template ->
-    Slots ps pl p ->
+    Slots ps pl ph p ->
     Statement p Int64
 rowsAffectedWith template slots =
     Statement.preparable (render (symbolTexts @ps) [] template) (slotsParams slots) D.rowsAffected
