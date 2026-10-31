@@ -13,6 +13,12 @@ instances from eight components to twenty-four.
 level, as `PostgresParams`, `PostgresColumns`, `HaskellParams` and
 `HaskellColumns`, so `hasql-check-hie` finds them in the `.hie` files.
 
+`--inferred` annotated the statement as written rather than as the quoter
+sends it, so a statement that writes its placeholders out of order, such as
+`set name = $2 where id = $1`, had its parameters' types paired with the
+wrong ones and was rejected. It now lowers the statement first, and reports
+an unused parameter by the number the statement was written with.
+
 Known gap: a param field reaches its type through `HasField`, whose
 `PgColumnType` stays stuck in the recorded type, so such a statement is
 reported as having no concrete type rather than being checked.

@@ -1,18 +1,19 @@
--- |
--- Module      : Hasql.Check.Inferred.Quote
--- Copyright   : (c) 2026 Kronor.io
---
--- License     : BSD-3-Clause
--- Maintainer  : lorenzo@kronor.io
--- Stability   : experimental
--- Portability : GHC
---
--- Quotes of "Hasql.Check.Inferred.TH", with the Haskell types GHC used them
--- at, as @hasql-check-hie@ writes them: one JSON object a line.
---
--- Each is checked as the hasql-th quote it stands for - the same SQL, with
--- the annotations the Haskell types give it - so that every check of an
--- annotated quote applies to it too.
+{- |
+Module      : Hasql.Check.Inferred.Quote
+Copyright   : (c) 2026 Kronor.io
+
+License     : BSD-3-Clause
+Maintainer  : lorenzo@kronor.io
+Stability   : experimental
+Portability : GHC
+
+Quotes of "Hasql.Check.Inferred.TH", with the Haskell types GHC used them
+at, as @hasql-check-hie@ writes them: one JSON object a line.
+
+Each is checked as the hasql-th quote it stands for - the same SQL, with
+the annotations the Haskell types give it - so that every check of an
+annotated quote applies to it too.
+-}
 module Hasql.Check.Inferred.Quote (
     Inferred (..),
     Column (..),
@@ -33,11 +34,11 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word32)
-import Hasql.Check (parsePlainStmt, quoterSettings, renderStmt)
+import Hasql.Check (parsePlainStmt, parseStmt, quoterSettings, renderStmt)
 import Hasql.Check.Annotate (annotate, typename, untypedLiterals)
 import Hasql.Check.Finding (Finding (..), statementHash)
-import Hasql.Check.Inferred (Piece (..), Template (..), render)
-import Hasql.Check.Inferred.TH (template)
+import Hasql.Check.Inferred (Template (..), render)
+import Hasql.Check.Inferred.TH (Parsed (..), Slot (..), parsed)
 import Hasql.Check.Nullability (Catalogue, query)
 import Hasql.Check.Nullability qualified as Nullability
 import Hasql.Check.Types qualified as Types
@@ -45,7 +46,6 @@ import PostgresqlSyntax qualified as Ast
 import Pqi qualified
 import Text.Read (readMaybe)
 import Prelude
-
 
 data Inferred = Inferred
     { file :: FilePath
@@ -58,9 +58,9 @@ data Inferred = Inferred
     -- ^ Nothing for a statement that returns no rows.
     }
 
-
--- | A parameter or result column: the qualified name of its Haskell type,
--- its Postgres type, and whether it is a 'Maybe'.
+{- | A parameter or result column: the qualified name of its Haskell type,
+its Postgres type, and whether it is a 'Maybe'.
+-}
 data Column = Column
     { haskellType :: Text
     , postgres :: Text
@@ -69,7 +69,6 @@ data Column = Column
     -- ^ The labels of the enum it is, if it is one.
     , nullable :: Bool
     }
-
 
 instance Aeson.FromJSON Inferred where
     parseJSON = Aeson.withObject "quote" \o ->
@@ -82,15 +81,14 @@ instance Aeson.FromJSON Inferred where
             <*> o .: "params"
             <*> o .:? "row"
 
-
 instance Aeson.FromJSON Column where
     parseJSON = Aeson.withObject "column" \o -> Column <$> o .: "type" <*> o .: "postgres" <*> (o .:? "labels" .!= []) <*> o .: "nullable"
 
-
--- | Everything checking an inferred statement finds: why it fails, or the
--- warnings asked for - nullability, narrowing - in terms of its Haskell
--- types, and its fingerprint for baselines: the SQL it sends, so that
--- reading a column as another type is another statement.
+{- | Everything checking an inferred statement finds: why it fails, or the
+warnings asked for - nullability, narrowing - in terms of its Haskell
+types, and its fingerprint for baselines: the SQL it sends, so that
+reading a column as another type is another statement.
+-}
 checkInferred :: Pqi.Connection -> Maybe Catalogue -> Bool -> Bool -> Inferred -> IO (Either String ([Finding], Text))
 checkInferred conn catalogue nullable narrowing q =
     checkSent conn q >>= \case
@@ -111,9 +109,9 @@ checkInferred conn catalogue nullable narrowing q =
                 let fingerprint = either (const (statementHash (renderStmt ast))) (statementHash . Text.encodeUtf8) (sent q)
                 pure (Right ([f{message = inHaskellTerms f.message} | f <- found], fingerprint))
 
-
--- | A finding about an inferred quote, in terms of its Haskell types rather
--- than the annotations they stand for.
+{- | A finding about an inferred quote, in terms of its Haskell types rather
+than the annotations they stand for.
+-}
 inHaskellTerms :: String -> String
 inHaskellTerms m =
     Text.unpack
@@ -123,7 +121,6 @@ inHaskellTerms m =
   where
     t = Text.pack m
 
-
 -- | Quotes, one JSON object a line.
 readInferred :: ByteString -> Either String [Inferred]
 readInferred contents =
@@ -131,54 +128,56 @@ readInferred contents =
         (\(n, l) -> either (\e -> Left ("line " <> show n <> ": " <> e)) Right (Aeson.eitherDecodeStrict l))
         [(n, l) | (n :: Int, l) <- zip [1 ..] (ByteString.Char8.lines contents), not (ByteString.Char8.null l)]
 
-
--- | The statement with its parameters annotated, as a hasql-th quote: its
--- result columns are cast around it, which the warnings see through
--- 'columns'.
+{- | The statement with its parameters annotated, as a hasql-th quote: its
+result columns are cast around it, which the warnings see through
+'columns'.
+-}
 annotated :: Inferred -> Either String Text
 annotated q = do
-    stmt <- parsePlainStmt False q.sql
+    -- Lowered, as the quoter sends it: the types come one per placeholder in
+    -- that order, which is not the order the statement writes them in when it
+    -- uses a parameter more than once, out of order, or by field.
+    stmt <- parseStmt q.sql
     params <- traverse (\c -> typename c.postgres c.nullable) q.params
     let param n = case drop (n - 1) params of
             t : _ | n >= 1 -> Just t
             _ -> Nothing
     pure (Ast.toText quoterSettings (annotate param stmt))
 
-
 -- | The statement as the quoter sends it, casts and all.
 sent :: Inferred -> Either String Text
 sent q = do
-    t <- template q.sql
+    t <- parsedTemplate <$> parsed q.sql
     params <- traverse postgresType q.params
     row <- traverse (traverse postgresType) q.row
     pure (render (map fst params) (maybe [] (map fst) row) t)
 
-
--- | The Postgres type each result column is read as, and whether it may be
--- NULL.
+{- | The Postgres type each result column is read as, and whether it may be
+NULL.
+-}
 columns :: Inferred -> Maybe [(Text, Bool)]
 columns q = either (const Nothing) Just . traverse postgresType =<< q.row
-
 
 postgresType :: Column -> Either String (Text, Bool)
 postgresType c = Right (c.postgres, c.nullable)
 
+{- | Whether the statement, as the quoter sends it, prepares; whether it
+takes as many parameters as the Haskell type sends, and returns as many
+columns as it reads, each of a type it can be read as. Prepared, as hasql
+prepares it, with the parameters' types, which Postgres could not tell for
+a parameter the statement does not use.
 
--- | Whether the statement, as the quoter sends it, prepares; whether it
--- takes as many parameters as the Haskell type sends, and returns as many
--- columns as it reads, each of a type it can be read as. Prepared, as hasql
--- prepares it, with the parameters' types, which Postgres could not tell for
--- a parameter the statement does not use.
---
--- A result column is cast to the type it is read as, and Postgres casts
--- anything it can convert, even text to a number, which fails at runtime for
--- text that is not one. So the column must have that type already, or one
--- Postgres converts to it without being told to: implicitly, or on
--- assignment.
+A result column is cast to the type it is read as, and Postgres casts
+anything it can convert, even text to a number, which fails at runtime for
+text that is not one. So the column must have that type already, or one
+Postgres converts to it without being told to: implicitly, or on
+assignment.
+-}
 checkSent :: Pqi.Connection -> Inferred -> IO [String]
-checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.params <*> traverse (traverse postgresType) q.row of
+checkSent conn q = case (,,) <$> parsed q.sql <*> traverse postgresType q.params <*> traverse (traverse postgresType) q.row of
     Left err -> pure [err]
-    Right (t, params, row) -> do
+    Right (p, params, row) -> do
+        let t = p.parsedTemplate
         oids <- traverse (oid . fst) params
         case sequence oids of
             Nothing -> pure ["a parameter's type does not exist: " <> unwords [Text.unpack name | ((name, _), Nothing) <- zip params oids]]
@@ -189,7 +188,10 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
                     Right found -> do
                         -- From the statement itself: prepared with the
                         -- types hasql sends, it takes them all, used or not.
-                        let used = [n | ParamType n <- t.whole]
+                        -- In the numbering the statement was written in,
+                        -- which lowering renumbers: each slot knows the
+                        -- parameter it came from.
+                        let used = [n | Slot n _ <- p.parsedSlots]
                             sends = length q.params
                             paramErrors =
                                 [ concat ["the Haskell type sends parameter $", show n, ", which the statement does not use"]
@@ -386,7 +388,6 @@ checkSent conn q = case (,,) <$> template q.sql <*> traverse postgresType q.para
             Right [[Just name]] -> pure (Text.unpack (Text.decodeUtf8Lenient name))
             _ -> pure ("type " <> show o)
     quoteLiteral name = mconcat ["'", Text.encodeUtf8 (Text.replace "'" "''" name), "'"]
-
 
 zip4 :: [a] -> [b] -> [c] -> [d] -> [(a, b, c, d)]
 zip4 (a : as) (b : bs) (c : cs) (d : ds) = (a, b, c, d) : zip4 as bs cs ds
