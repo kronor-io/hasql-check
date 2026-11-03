@@ -1033,8 +1033,25 @@ slotsNone :: Slots '[] '[] '[] p
 slotsNone = Slots mempty
 
 -- | One parameter slot, sending what the projection picks out.
-slotsOne :: forall a p. (Column a) => (p -> a) -> Slots '[PgColumnType a] '[PgColumnLabels a] '[a] p
+slotsOne :: forall a p s l. (Column a, SlotType a s l) => (p -> a) -> Slots '[s] '[l] '[a] p
 slotsOne f = Slots (f >$< E.param encodeColumn)
+
+{- | A slot's Postgres type and labels, 'PgColumnType' and 'PgColumnLabels'
+of the type it sends, worked out only once that type is known.
+
+A param field's type is only known once GHC has solved its 'HasField',
+after it has settled the slot's type. Had the slot carried
+@'PgColumnType' a@ itself, GHC would have recorded the family unreduced,
+as @'PgColumnType' Text@ rather than @"text"@, and @hasql-check-hie@,
+which cannot reduce it, could not check the statement. Like 'Column''s,
+these instances cannot be told apart until the type is known, so GHC waits
+for it before reducing the families.
+-}
+class SlotType a (s :: Symbol) (l :: [Symbol]) | a -> s l
+
+instance {-# OVERLAPPABLE #-} (s ~ PgColumnType a, l ~ PgColumnLabels a) => SlotType a s l
+
+instance (s ~ PgColumnType (Maybe a), l ~ PgColumnLabels (Maybe a)) => SlotType (Maybe a) s l
 
 -- | One more slot, appending its type.
 slotsAp :: Slots ps ls hs p -> Slots qs ms is p -> Slots (Append ps qs) (Append ls ms) (Append hs is) p

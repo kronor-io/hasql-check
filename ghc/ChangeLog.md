@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Statements with `$1.$field` param fields are checked, by `hasql-check-hie`
+and the plugin alike, once built with a `hasql-check` that records their
+slots' Postgres types reduced; see its changelog. The tests compile them to
+`.hie` files and check them with `hasql-check --inferred`, under a
+`kronor-syntax` flag to set with `hasql-check`'s.
+
 ## 0.5.1.0
 
 `hasql-check-hie` identified an inferred quote by its `Params` dictionary,
