@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2.0
 
 A statement with `$1.$field` param fields could not be checked from a `.hie`
 file, nor by the plugin: `hasql-check-hie` said its types were not known
