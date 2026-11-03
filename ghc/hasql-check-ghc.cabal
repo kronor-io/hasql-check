@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            hasql-check-ghc
-version:         0.5.1.0
+version:         0.5.2.0
 synopsis:
   Check inferred hasql statements with what GHC knows of their types
 
@@ -77,7 +77,7 @@ library
     , base         >=4.21 && <4.23
     , bytestring   >=0.11 && <0.13
     , ghc          >=9.12 && <9.15
-    , hasql-check  >=0.5  && <0.6
+    , hasql-check  >=0.5.2 && <0.6
     , text         >=2.0  && <2.2
 
 executable hasql-check-hie
