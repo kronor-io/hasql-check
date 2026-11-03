@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+A statement with `$1.$field` param fields could not be checked from a `.hie`
+file, nor by the plugin: `hasql-check-hie` said its types were not known
+where it is written. A field's type is only known once GHC has solved its
+`HasField`, after it has already settled each slot's Postgres type as an
+unsolved `PgColumnType a`; so GHC recorded `PgColumnType Text` rather than
+`"text"`, which `hasql-check-hie` cannot reduce. A slot's Postgres type and
+labels now come from `SlotType`, whose instances GHC cannot choose between
+until the field's type is known, so they are recorded reduced.
+
+`--inferred` took the number of parameters a statement with param fields is
+sent to be its number of placeholders, so it reported each placeholder past
+the first parameter's as a parameter the statement does not use. It now
+counts the statement's parameters, as the quoter's pattern takes them.
+
 ## 0.5.1.0
 
 The quoters of `Hasql.Check.Inferred.TH` now take the Haskell targets and

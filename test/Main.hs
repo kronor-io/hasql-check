@@ -225,6 +225,12 @@ syntaxSpec = do
     itWithOuter "annotates the parameters in the order they are sent, not written" \conn ->
         runInferred conn [] [inferredQuote "resultlessStatement" "insert into tag (label, id) values ($2, $1)" [text, int32] Nothing]
             `shouldReturn` (ExitSuccess, "")
+
+    -- A type per slot, so three for two parameters: the record's two fields,
+    -- and $2. None of them is a parameter the statement does not use.
+    itWithOuter "counts a record parameter once, however many fields it sends" \conn ->
+        runInferred conn [] [inferredQuote "resultlessStatement" "update tag set id = $1.$id where id = $1.$other and label = $2" [int32, int32, text] Nothing]
+            `shouldReturn` (ExitSuccess, "")
 #else
 syntaxSpec =
     itWithOuter "rejects Haskell targets, which upstream hasql-th does not accept" \conn -> do

@@ -1,5 +1,10 @@
+{-# LANGUAGE CPP #-}
+
 -- | The plugin, as GHC runs it: each case compiles a fixture module with
--- @-fplugin=Hasql.Check.Plugin@, against a throwaway PostgreSQL server.
+-- @-fplugin=Hasql.Check.Plugin@, against a throwaway PostgreSQL server. Or
+-- hasql-check-hie, as a sandboxed build runs it: the case compiles the
+-- module to a .hie file, which hasql-check-hie reads and hasql-check
+-- --inferred checks against the same server.
 --
 -- GHC finds the plugin and its dependencies through the package environment
 -- cabal writes (@write-ghc-environment-files: always@ in cabal.project), and
@@ -34,6 +39,7 @@ main = do
 
 data Case = Case
     { caseName :: String
+    , via :: Via
     , before :: [Database]
     -- ^ Compilations of the same module, in the same directory, first.
     , database :: Database
@@ -46,10 +52,16 @@ data Case = Case
 data Database = TestDatabase | NoDatabase | Unreachable
 
 
+-- | Which of the two checks the statements: the compiler plugin, or
+-- hasql-check --inferred on what hasql-check-hie read from the .hie file.
+data Via = Plugin | Hie
+
+
 cases :: [Case]
 cases =
     [ Case
         "checks nothing when no database is set"
+        Plugin
         []
         NoDatabase
         []
@@ -57,6 +69,7 @@ cases =
         \(code, out) -> code == ExitSuccess && not ("hasql-check:" `isInfixOf` out)
     , Case
         "accepts a statement that fits the schema"
+        Plugin
         []
         TestDatabase
         []
@@ -64,6 +77,7 @@ cases =
         \(code, _) -> code == ExitSuccess
     , Case
         "fails at the quote on a statement that does not prepare"
+        Plugin
         []
         TestDatabase
         []
@@ -74,6 +88,7 @@ cases =
                 && "column \"nope\" does not exist" `isInfixOf` out
     , Case
         "fails on a column read through a conversion that can fail"
+        Plugin
         []
         TestDatabase
         []
@@ -81,6 +96,7 @@ cases =
         \(code, out) -> code /= ExitSuccess && "column 1 (email) is text, but is read as" `isInfixOf` out
     , Case
         "fails on an enum read without a label the database has"
+        Plugin
         []
         TestDatabase
         []
@@ -102,6 +118,7 @@ cases =
         \(code, out) -> code /= ExitSuccess && "which cannot read labels payment_state has: REFUNDED" `isInfixOf` out
     , Case
         "warns about a nullable column read without a Maybe, without failing"
+        Plugin
         []
         TestDatabase
         [("HASQL_CHECK_NULLABILITY", "1")]
@@ -112,6 +129,7 @@ cases =
                 && "warning: hasql-check: column 1 (nickname) is not a Maybe in Haskell" `isInfixOf` out
     , Case
         "checks the statement GHC compiled, after CPP, not the file"
+        Plugin
         []
         TestDatabase
         []
@@ -130,6 +148,7 @@ cases =
         \(code, out) -> code /= ExitSuccess && "column \"nope\" does not exist" `isInfixOf` out
     , Case
         "checks a module compiled before without a database once one is set"
+        Plugin
         [NoDatabase]
         TestDatabase
         []
@@ -137,12 +156,130 @@ cases =
         \(code, out) -> code /= ExitSuccess && "column \"nope\" does not exist" `isInfixOf` out
     , Case
         "does not fail the build when the database cannot be reached"
+        Plugin
         []
         Unreachable
         []
         (fixture "Statement Int64 Text" "select nope from customer where id = $1")
         \(code, out) -> code == ExitSuccess && "hasql-check: not checking statements" `isInfixOf` out
+    , Case
+        "checks a statement from its .hie file"
+        Hie
+        []
+        TestDatabase
+        []
+        (fixture "Statement Int64 Int64" "select email from customer where id = $1")
+        \(code, out) ->
+            code /= ExitSuccess
+                && "Error in Fixture.hs:11:5" `isInfixOf` out
+                && "column 1 (email) is text, but is read as GHC.Internal.Int.Int64" `isInfixOf` out
     ]
+        <> fieldCases
+
+
+-- | Statements with $1.$field param fields, which only hasql-check's
+-- kronor-syntax flag accepts. Each slot's type is the type of the field it
+-- sends, which GHC only knows once it has solved the field's HasField.
+fieldCases :: [Case]
+#ifdef KRONOR_SYNTAX
+fieldCases =
+    [ Case
+        "recovers the types of a record parameter's fields from a .hie file"
+        Hie
+        []
+        TestDatabase
+        []
+        (discrepancy "Maybe Int64" "Bool")
+        \(code, out) ->
+            code == ExitSuccess
+                && ( concat
+                        [ "\"params\":["
+                        , param "Data.Text.Internal.Text" "text" False
+                        , ","
+                        , param "Data.UUID.Types.Internal.UUID" "uuid" True
+                        , ","
+                        , param "GHC.Internal.Int.Int64" "int8" True
+                        , ","
+                        , param "Data.Text.Internal.Text" "text" True
+                        , "],\"row\":["
+                        , param "GHC.Internal.Types.Bool" "bool" False
+                        , "]"
+                        ]
+                   )
+                `isInfixOf` out
+    , Case
+        "reports a record parameter's field sent as the wrong type, from a .hie file"
+        Hie
+        []
+        TestDatabase
+        []
+        (discrepancy "Maybe Text" "Bool")
+        \(code, out) -> code /= ExitSuccess && "function record_discrepancy(text, uuid, text, text) does not exist" `isInfixOf` out
+    , Case
+        "reports a column read as the wrong type, with a record parameter, from a .hie file"
+        Hie
+        []
+        TestDatabase
+        []
+        (discrepancy "Maybe Int64" "Int64")
+        \(code, out) -> code /= ExitSuccess && "column 1 (record_discrepancy) is boolean, but is read as GHC.Internal.Int.Int64" `isInfixOf` out
+    , Case
+        "accepts a statement with a record parameter that fits the schema"
+        Plugin
+        []
+        TestDatabase
+        []
+        (discrepancy "Maybe Int64" "Bool")
+        \(code, _) -> code == ExitSuccess
+    , Case
+        "fails on a column read as the wrong type, with a record parameter"
+        Plugin
+        []
+        TestDatabase
+        []
+        (discrepancy "Maybe Int64" "Int64")
+        \(code, out) -> code /= ExitSuccess && "column 1 (record_discrepancy) is boolean, but is read as GHC.Internal.Int.Int64" `isInfixOf` out
+    ]
+  where
+    param type' postgres nullable =
+        concat ["{\"type\":\"", type', "\",\"postgres\":\"", postgres, "\",\"labels\":[],\"nullable\":", if nullable then "true" else "false", "}"]
+
+
+{- | A module with one statement that sends the fields of a record, given
+the type of its amount field and the type of the row: record_discrepancy
+takes an int8 amount and returns a boolean.
+
+The fork's parser wants white space after a field, before a comma or a
+closing parenthesis, so the fields are written one a line.
+-}
+discrepancy :: String -> String -> String
+discrepancy amount row =
+    unlines
+        [ "{-# LANGUAGE DataKinds, QuasiQuotes #-}"
+        , "module Fixture where"
+        , ""
+        , "import Data.Int (Int64)"
+        , "import Data.Text (Text)"
+        , "import Data.UUID (UUID)"
+        , "import Hasql.Check.Inferred.TH"
+        , "import Hasql.Statement (Statement)"
+        , ""
+        , "data Discrepancy = Discrepancy {kind :: Text, orderId :: Maybe UUID, amount :: " <> amount <> ", note :: Maybe Text}"
+        , ""
+        , "s :: Statement Discrepancy " <> row
+        , "s ="
+        , "    [singletonStatement|"
+        , "        select record_discrepancy("
+        , "              $1.$kind"
+        , "            , $1.$orderId"
+        , "            , $1.$amount"
+        , "            , $1.$note"
+        , "        )"
+        , "    |]"
+        ]
+#else
+fieldCases = []
+#endif
 
 
 -- | A module with one statement, of the given type, on line 11.
@@ -179,8 +316,28 @@ run compiler env conn c =
                 readCreateProcessWithExitCode
                     (proc compiler ["-package-env", env, "-fno-code", "-fwrite-interface", "-fplugin=Hasql.Check.Plugin", "Fixture.hs"]){Process.cwd = Just dir, Process.env = Just procEnv}
                     ""
-        mapM_ compile c.before
-        (code, out, err) <- compile c.database
+        (code, out, err) <- case c.via of
+            Plugin -> do
+                mapM_ compile c.before
+                compile c.database
+            Hie -> do
+                (built, buildOut, buildErr) <-
+                    readCreateProcessWithExitCode
+                        (proc compiler ["-package-env", env, "-fno-code", "-fwrite-ide-info", "-hiedir", ".", "Fixture.hs"]){Process.cwd = Just dir}
+                        ""
+                if built /= ExitSuccess
+                    then pure (built, buildOut, buildErr)
+                    else do
+                        (read', quotes, readErr) <- readCreateProcessWithExitCode (proc "hasql-check-hie" ["Fixture.hie"]){Process.cwd = Just dir} ""
+                        writeFile (dir </> "statements.jsonl") quotes
+                        if read' /= ExitSuccess
+                            then pure (read', quotes, readErr)
+                            else do
+                                (checked, checkOut, checkErr) <-
+                                    readCreateProcessWithExitCode
+                                        (proc "hasql-check" ["--database", conn, "--inferred", "statements.jsonl"]){Process.cwd = Just dir}
+                                        ""
+                                pure (checked, quotes <> checkOut, readErr <> checkErr)
         let ok = c.expect (code, out <> err)
         unless ok (putStrLn (c.caseName <> ":\n" <> show code <> "\n" <> out <> err))
         pure ok
@@ -243,6 +400,6 @@ withPostgres action =
                     [ conn
                     , "--quiet"
                     , "--command"
-                    , "create table customer (id int8 primary key, email text not null, nickname text); create type payment_state as enum ('PENDING', 'PAID', 'REFUNDED'); create table payment (id int8 primary key, state payment_state not null)"
+                    , "create table customer (id int8 primary key, email text not null, nickname text); create type payment_state as enum ('PENDING', 'PAID', 'REFUNDED'); create table payment (id int8 primary key, state payment_state not null); create function record_discrepancy(text, uuid, int8, text) returns boolean language sql as 'select true'"
                     ]
                 action conn
