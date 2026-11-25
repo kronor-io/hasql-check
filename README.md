@@ -20,6 +20,8 @@ that reports the same errors while GHC compiles. It also comes with quoters
 that need no annotations at all, taking the types from how the statement is
 used in Haskell.
 
+hasql-check is one of the PostgreSQL tools Kronor uses together: [sqiff](https://github.com/kronor-io/sqiff) and [sqint](https://github.com/kronor-io/sqint) look after the schema in sqitch, and hasql-check checks the Haskell code against it. [sqitchcraft](https://kronor-io.github.io/sqitchcraft/) shows how they fit together.
+
 ## Contents
 
 - [Installing](#installing)
