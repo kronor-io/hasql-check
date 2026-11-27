@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0.0
+
+Requires `hasql-check` 0.6, whose lexer finds the quasiquotes; see its
+changelog. Nothing else changes.
+
 ## 0.5.2.0
 
 Statements with `$1.$field` param fields are checked, by `hasql-check-hie`

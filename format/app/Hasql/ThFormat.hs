@@ -14,8 +14,8 @@ import Data.Ord (Down (..), comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Hasql.Check.Lexer (AlexPosn (..), runAlex)
-import Hasql.Check.Parser (QuasiQuote (..), parse)
+import Hasql.Check.Lexer (AlexPosn (..))
+import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
 import Hasql.Check.Quoter (quotersSupported)
 import Hasql.ThFormat.SqlFormat (formatSql)
 import Prelude
@@ -28,17 +28,17 @@ data ProcessResult
     deriving (Show, Eq)
 
 
--- | Format a ByteString in memory, returning the result. The Alex lexer
--- requires a lazy ByteString so we convert at this single boundary; the rest
--- of the pipeline works on strict bytes. Returns 'Left' with a
+-- | Format a ByteString in memory, returning the result. The parser takes a
+-- lazy ByteString so we convert at this single boundary; the rest of the
+-- pipeline works on strict bytes. Returns 'Left' with a
 -- newline-separated list of per-QQ errors if the formatter ever emitted
 -- AST-divergent SQL; the bytes are left untouched in that case.
 processBytes :: ByteString -> Either String ByteString
 processBytes original =
-    case runAlex (BSL.fromStrict original) parse of
+    case parseQuasiQuotes (BSL.fromStrict original) of
         Left err -> Left err
         Right qqs ->
-            let supported = reverse (filter isSupportedQuoter qqs)
+            let supported = filter isSupportedQuoter qqs
                 results = map makeReplacement supported
                 errors = lefts results
                 replacements = rights results

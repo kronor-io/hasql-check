@@ -23,8 +23,8 @@ import Data.ByteString.Lazy qualified as BSL
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Hasql.Check.Lexer (AlexPosn (..), runAlex)
-import Hasql.Check.Parser (QuasiQuote (..), parse)
+import Hasql.Check.Lexer (AlexPosn (..))
+import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
 import Hasql.Check.Quoter (quotersSupported)
 import PostgresqlSyntax qualified as Ast
 import System.Environment (getArgs)
@@ -82,7 +82,7 @@ main = do
 -- | Extract supported hasql-th QQs from a Haskell source ByteString.
 extractQqs :: BS.ByteString -> Either String [QuasiQuote]
 extractQqs bs =
-    case runAlex (BSL.fromStrict bs) parse of
+    case parseQuasiQuotes (BSL.fromStrict bs) of
         Left err -> Left err
         Right qqs -> Right (filter isSupportedQuoter qqs)
 
