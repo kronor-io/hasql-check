@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.0.0
+
+The quasiquote lexer is a hand-written one instead of an Alex lexer and a
+Happy grammar, and reads Haskell as GHC does in places the old one did not,
+each of which could hide a quote or make one up:
+
+- `[e|`, `[d|`, `[t|` and `[p|` open Template Haskell brackets, whose
+  contents are Haskell; they were read as quasiquotes ending at the first
+  `|]`, even one inside a string.
+- A pragma is read to its `#-}` with its string literals, so a `-}` or a
+  quote in a pragma's string is text.
+- Identifiers and operators may be Unicode: `⊕--` is an operator, not a
+  comment; `é'` is an identifier, not the start of a character literal; and
+  a quoter may be named `rø`, or with a combining mark.
+- Columns count characters, and a tab to the next multiple of eight; they
+  counted bytes.
+
+`Hasql.Check.Lexer` now exports `tokenize`, which splits a source into code,
+comments, pragmas, string and character literals and quasiquotes with their
+positions, for tools that need more than the quotes. `AlexPosn`,
+`QuasiQuote`, `parseQuasiQuotes` and `parseFile` are as they were; the
+Alex and Happy internals (`runAlex`, `parse`, `scanner`, `lexFile`,
+`Lexeme`) are gone, and so are the `alex`, `happy` and `array` dependencies.
+
 ## 0.5.2.0
 
 A statement with `$1.$field` param fields could not be checked from a `.hie`

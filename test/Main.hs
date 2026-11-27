@@ -19,7 +19,7 @@ import Data.Vector qualified as Vector
 import GHC.Generics (Generic)
 import Hasql.Check.Inferred (Domain (..), PgEnum (..), Value, qualifiedName, render)
 import Hasql.Check.Inferred.TH qualified as Inferred
-import Hasql.Check.Lexer (AlexPosn (..))
+import Hasql.Check.Lexer (AlexPosn (..), Token (..), TokenKind (..), tokenize)
 import Hasql.Check.Parser (QuasiQuote (..), parseQuasiQuotes)
 import Hasql.Check.TH qualified as Checked
 import Hasql.Connection qualified as Connection
@@ -112,6 +112,37 @@ lexerSpec = do
     it "rejects a quote left open" $
         quotes "f = [singletonStatement|select 1 :: int4\n"
             `shouldSatisfy` either ("not closed" `isInfixOf`) (const False)
+
+    it "reads a Template Haskell bracket as Haskell, not a quote" $
+        quotes "[d| x = \"|] [singletonStatement|select 1 :: int4|]\" |]\nf = [singletonStatement|select 2 :: int4|]\n"
+            `shouldBe` Right [("singletonStatement", 2, 5, "select 2 :: int4")]
+
+    it "reads a pragma's strings, closing bracket and all" $
+        quotes "{-# WARNING f \"#-} [singletonStatement|select 1 :: int4|]\" #-}\nf = [singletonStatement|select 2 :: int4|]\n"
+            `shouldBe` Right [("singletonStatement", 2, 5, "select 2 :: int4")]
+
+    it "reads a Unicode operator ending in dashes as an operator" $
+        quotes "x = a \8853-- [raw|\n[singletonStatement|select 1 :: int4|]\n"
+            `shouldBe` Right [("raw", 1, 11, "\n[singletonStatement|select 1 :: int4")]
+
+    it "reads a primed Unicode identifier, not a character literal" $
+        quotes "x = \233'\"'[singletonStatement|select 1 :: int4|]\"\nf = [singletonStatement|select 2 :: int4|]\n"
+            `shouldBe` Right [("singletonStatement", 2, 5, "select 2 :: int4")]
+
+    it "reads quoters with Unicode names, combining marks too" $
+        quotes "x = [r\248|[singletonStatement|1|] <> [re\769|a|]\n"
+            `shouldBe` Right [("r\248", 1, 5, "[singletonStatement|1"), ("re\769", 1, 36, "a")]
+
+    it "counts columns in characters and tabs to the next multiple of eight" $
+        quotes "s = \"\233\" <> [q|a|]\n\t[q|b|]\n"
+            `shouldBe` Right [("q", 1, 12, "a"), ("q", 2, 9, "b")]
+
+    it "tokenizes a source into pieces that put together are the source" $ do
+        let source = "{-# LANGUAGE QuasiQuotes #-}\nmodule M where -- c\ns = \"[q|\" <> [q|x|]\n"
+            Right tokens = tokenize source
+        Text.concat (map tokenText tokens) `shouldBe` source
+        [kind | Token{tokenKind = kind} <- tokens, kind /= Code]
+            `shouldBe` [Pragma, Comment, StringLiteral, QuasiQuoted "q" "x" (AlexPn 66 3 18)]
 
 {- | A connection string for a throwaway server, reachable only over a socket
 in a temporary directory.

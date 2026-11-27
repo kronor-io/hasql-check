@@ -96,7 +96,7 @@ executable hasql-th-format
   build-depends:
     , base               >=4.20 && <4.23
     , bytestring         >=0.11 && <0.13
-    , hasql-check        >=0.5  && <0.6
+    , hasql-check        >=0.6  && <0.7
     , postgresql-syntax  >=0.5  && <0.6
     , prettyprinter      >=1.7  && <1.8
     , text               >=2.0  && <2.2
@@ -123,7 +123,7 @@ executable hasql-th-audit
   build-depends:
     , base               >=4.20 && <4.23
     , bytestring         >=0.11 && <0.13
-    , hasql-check        >=0.5  && <0.6
+    , hasql-check        >=0.6  && <0.7
     , postgresql-syntax  >=0.5  && <0.6
     , text               >=2.0  && <2.2
 
@@ -149,7 +149,7 @@ test-suite hasql-th-format-test
     ghc-options: -Werror
   build-depends:
     , base                >=4.20 && <4.23
-    , hasql-check         >=0.5  && <0.6
+    , hasql-check         >=0.6  && <0.7
     , postgresql-syntax   >=0.5  && <0.6
     , prettyprinter       >=1.7  && <1.8
     , string-interpolate  >=0.3  && <0.4
