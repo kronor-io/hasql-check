@@ -16,6 +16,8 @@ each of which could hide a quote or make one up:
   a quoter may be named `rø`, or with a combining mark.
 - Columns count characters, and a tab to the next multiple of eight; they
   counted bytes.
+- `"""` opens a MultilineStrings literal: the lexer assumes the extension is
+  on, since it sees one file and not the cabal file that may turn it on.
 
 `Hasql.Check.Lexer` now exports `tokenize`, which splits a source into code,
 comments, pragmas, string and character literals and quasiquotes with their

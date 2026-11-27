@@ -125,6 +125,22 @@ lexerSpec = do
         quotes "x = a \8853-- [raw|\n[singletonStatement|select 1 :: int4|]\n"
             `shouldBe` Right [("raw", 1, 11, "\n[singletonStatement|select 1 :: int4")]
 
+    it "reads an ASCII operator ending in dashes as an operator" $
+        quotes "x = f +-- [raw|{ a }|]\n"
+            `shouldBe` Right [("raw", 1, 11, "{ a }")]
+
+    it "reads a block comment opener in a pragma's string as text" $
+        quotes "{-# WARNING old \"Use {- for a block comment\" #-}\nf = [singletonStatement|select 1 :: int4|]\n"
+            `shouldBe` Right [("singletonStatement", 2, 5, "select 1 :: int4")]
+
+    it "reads a Unicode quoter's quote to its end, not a quote inside it" $
+        quotes "x = [\948|literal [raw|{ a }|]\n"
+            `shouldBe` Right [("\948", 1, 5, "literal [raw|{ a }")]
+
+    it "reads three double quotes as a multiline string, assuming MultilineStrings" $
+        quotes "f = g \"\"\"x\"\ny = [singletonStatement|select 1 :: int4|]\n"
+            `shouldBe` Right []
+
     it "reads a primed Unicode identifier, not a character literal" $
         quotes "x = \233'\"'[singletonStatement|select 1 :: int4|]\"\nf = [singletonStatement|select 2 :: int4|]\n"
             `shouldBe` Right [("singletonStatement", 2, 5, "select 2 :: int4")]
@@ -139,10 +155,12 @@ lexerSpec = do
 
     it "tokenizes a source into pieces that put together are the source" $ do
         let source = "{-# LANGUAGE QuasiQuotes #-}\nmodule M where -- c\ns = \"[q|\" <> [q|x|]\n"
-            Right tokens = tokenize source
-        Text.concat (map tokenText tokens) `shouldBe` source
-        [kind | Token{tokenKind = kind} <- tokens, kind /= Code]
-            `shouldBe` [Pragma, Comment, StringLiteral, QuasiQuoted "q" "x" (AlexPn 66 3 18)]
+        case tokenize source of
+            Left err -> expectationFailure err
+            Right tokens -> do
+                Text.concat (map tokenText tokens) `shouldBe` source
+                [kind | Token{tokenKind = kind} <- tokens, kind /= Code]
+                    `shouldBe` [Pragma, Comment, StringLiteral, QuasiQuoted "q" "x" (AlexPn 66 3 18)]
 
 {- | A connection string for a throwaway server, reachable only over a socket
 in a temporary directory.

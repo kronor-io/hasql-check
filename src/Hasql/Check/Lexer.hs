@@ -12,6 +12,11 @@ a mistake would hide a quote or invent one:
 * string literals (with escapes and gaps), MultilineStrings literals and
   character literals are text, and an identifier with a prime (@x'@, @é'@)
   does not start a character literal;
+* MultilineStrings is assumed on, so every @\"\"\"@ opens a multiline
+  string. Without the extension, @f \"\"\"x\"@ is an empty string next to
+  @\"x\"@, and this lexer reads the rest of the module as one string. The
+  lexer sees one file, not the cabal file that may turn the extension on,
+  so it takes the extension's reading;
 * identifiers and operators may be Unicode, so a quoter may be named
   @rø@ or with a combining mark;
 * @[e|@, @[d|@, @[t|@ and @[p|@ open Template Haskell brackets, whose
